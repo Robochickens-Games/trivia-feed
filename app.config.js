@@ -1,5 +1,6 @@
 // app.config.js
 // Note: dotenv works here because app.config.js runs in Node.js environment during build
+import 'dotenv/config';
 const path = require('path');
 const dotenv = require('dotenv');
 
@@ -50,72 +51,64 @@ if (!openaiApiKey) {
   console.log("OpenAI API key configured. Question generation feature enabled.");
 }
 
-module.exports = {
-  name: "Trivia Feed",
-  slug: "trivia-feed",
-  scheme: "trivia-feed",
-  version: "1.0.0",
-  extra: {
-    // Use the validated URL
-    supabaseUrl: finalUrl, 
-    
-    supabaseAnonKey: process.env.SUPABASE_KEY ||
-                    process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ||
-                    WORKING_SUPABASE_KEY,
-    
-    // Add OpenAI API key to expo config extras
-    openaiApiKey: openaiApiKey,
-    
-    eas: {
-      projectId: "dab32358-550f-4ac2-861e-ccda6a8cef14"
-    }
-  },
-  updates: {
-    url: "https://u.expo.dev/dab32358-550f-4ac2-861e-ccda6a8cef14",
-    enabled: true,
-    checkAutomatically: "ON_LOAD"
-  },
-  runtimeVersion: "1.0.0",
-  splash: {
-    image: "./assets/images/splash-icon.png",
-    resizeMode: "contain",
-    backgroundColor: "#151718"
-  },
-  assetBundlePatterns: [
-    "**/*"
-  ],
-  ios: {
-    supportsTablet: true,
-    bundleIdentifier: "com.triviafeed",
-    infoPlist: {
-      UIAppFonts: [
-        "AntDesign.ttf",
-        "Feather.ttf",
-        "FontAwesome.ttf",
-        "MaterialIcons.ttf"
-      ]
-    }
-  },
-  android: {
-    adaptiveIcon: {
-      foregroundImage: "./assets/images/adaptive-icon.png",
+export default {
+  expo: {
+    name: "trivia-feed",
+    slug: "trivia-feed",
+    scheme: "trivia-feed",
+    version: "1.0.0",
+    extra: {
+      supabaseUrl: process.env.EXPO_PUBLIC_SUPABASE_URL,
+      supabaseAnonKey: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+      eas: {
+        projectId: process.env.EAS_PROJECT_ID
+      }
+    },
+    updates: {
+      url: "https://u.expo.dev/dab32358-550f-4ac2-861e-ccda6a8cef14",
+      enabled: true,
+      checkAutomatically: "ON_LOAD"
+    },
+    runtimeVersion: "1.0.0",
+    splash: {
+      image: "./assets/images/splash-icon.png",
+      resizeMode: "contain",
       backgroundColor: "#151718"
     },
-    package: "com.triviafeed"
-  },
-  web: {
-    favicon: "./assets/images/favicon.png",
-    templatePath: "./web-build-template.html",
-    bundler: "metro"
-  },
-  plugins: [
-    "expo-router",
-    [
-      "expo-splash-screen",
-      {
-        imageResizeMode: "contain",
-        backgroundColor: "#151718"
+    assetBundlePatterns: [
+      "**/*"
+    ],
+    ios: {
+      supportsTablet: true,
+      bundleIdentifier: "com.triviafeed",
+      infoPlist: {
+        UIAppFonts: [
+          "AntDesign.ttf",
+          "Feather.ttf",
+          "FontAwesome.ttf",
+          "MaterialIcons.ttf"
+        ]
       }
+    },
+    android: {
+      adaptiveIcon: {
+        foregroundImage: "./assets/images/adaptive-icon.png",
+        backgroundColor: "#151718"
+      },
+      package: "com.triviafeed"
+    },
+    web: {
+      favicon: "./assets/images/favicon.png"
+    },
+    plugins: [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          imageResizeMode: "contain",
+          backgroundColor: "#151718"
+        }
+      ]
     ]
-  ]
+  }
 }; 

@@ -14,3 +14,11 @@ expo-env.d.ts
 # Deployment
 .vercel
 dist/
+node_modules/
+
+# Expo
+.expo/
+
+# Xcode
+*.xcworkspace
+*.xcuserdata

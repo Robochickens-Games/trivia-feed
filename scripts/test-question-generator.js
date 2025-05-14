@@ -11,32 +11,18 @@ require('dotenv').config();
 const SUPABASE_URL = "https://vdrmtsifivvpioonpqqc.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZkcm10c2lmaXZ2cGlvb25wcXFjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDYzNDQyMzIsImV4cCI6MjA2MTkyMDIzMn0.OtAUoIz1ZCCE5IncVvpHnDGrTXEQy_JoyvNE0QQf6wA";
 
-// Get OpenAI API key from environment variables
-const openaiKey = process.env.OPENAI_API_KEY;
-
 console.log('Environment Variables:');
 console.log('- SUPABASE URL:', SUPABASE_URL ? 'Using hardcoded value' : 'Missing');
 console.log('- SUPABASE KEY:', SUPABASE_KEY ? 'Using hardcoded value' : 'Missing');
-console.log('- OPENAI KEY:', openaiKey ? 'Found' : 'Missing');
-
-// Check if OpenAI key is available
-if (!openaiKey) {
-  console.error('Error: OPENAI_API_KEY is not set in your .env file');
-  console.error('Please add OPENAI_API_KEY to your .env file and try again');
-  process.exit(1);
-}
 
 // Create a Supabase client
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// OpenAI API parameters
-const openaiEndpoint = 'https://api.openai.com/v1/chat/completions';
-
-// Mock question generation function
+// Question generation function
 async function generateQuestions(topics) {
   console.log(`Generating questions for topics: ${topics.join(', ')}`);
   
-  // Define the prompt for OpenAI
+  // Define the prompt for the edge function
   const prompt = `Generate 3 unique trivia questions about the following topics: ${topics.join(', ')}. 
   
   Each question should include:
@@ -60,20 +46,25 @@ async function generateQuestions(topics) {
     "difficulty": "easy|medium|hard",
     "learningCapsule": "Interesting fact about the answer",
     "tags": ["tag1", "tag2", "tag3"]
-  }
-  
-  Ensure questions are factually accurate and make each one unique and interesting.`;
+  }`;
   
   try {
-    // Make the API call to OpenAI
-    const response = await fetch(openaiEndpoint, {
+    console.log('Making request to edge function with:');
+    console.log('URL:', 'https://vdrmtsifivvpioonpqqc.supabase.co/functions/v1/generateTriviaQuestions');
+    console.log('Headers:', {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_KEY.substring(0, 10)}...` // Only log part of the token for security
+    });
+    console.log('Request body:', JSON.stringify({ prompt }, null, 2));
+
+    const response = await fetch('https://vdrmtsifivvpioonpqqc.supabase.co/functions/v1/generateTriviaQuestions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openaiKey}`
+        'Authorization': `Bearer ${SUPABASE_KEY}`
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4o',
         messages: [
           {
             role: 'system',
@@ -89,31 +80,42 @@ async function generateQuestions(topics) {
       })
     });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(`OpenAI API error: ${errorData.error?.message || 'Unknown error'}`);
+    console.log('Response status:', response.status);
+    console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+    
+    const responseText = await response.text();
+    console.log('Raw response:', responseText);
+    
+    let responseData;
+    try {
+      responseData = JSON.parse(responseText);
+      console.log('Parsed response:', JSON.stringify(responseData, null, 2));
+      
+      // Extract the JSON array from the content string
+      const content = responseData.choices[0].message.content;
+      const jsonMatch = content.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      if (!jsonMatch) {
+        throw new Error('Failed to find JSON array in response content');
+      }
+      
+      // Parse the JSON array
+      const questions = JSON.parse(jsonMatch[0]);
+      console.log('Extracted questions:', JSON.stringify(questions, null, 2));
+      
+      // Add source and timestamp to each question
+      return questions.map(q => ({
+        ...q,
+        source: 'generated',
+        created_at: new Date().toISOString()
+      }));
+    } catch (e) {
+      console.error('Failed to parse response:', e);
+      throw new Error('Invalid JSON response from edge function');
     }
 
-    const data = await response.json();
-    
-    // Parse the response to extract the generated questions
-    const content = data.choices[0].message.content;
-    
-    // Find the JSON part in the response
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error('Failed to parse generated questions');
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}, body: ${responseText}`);
     }
-    
-    // Parse JSON and return
-    const generatedQuestions = JSON.parse(jsonMatch[0]);
-    
-    // Add source and timestamp
-    return generatedQuestions.map(q => ({
-      ...q,
-      source: 'generated',
-      created_at: new Date().toISOString()
-    }));
   } catch (error) {
     console.error('Error generating questions:', error);
     throw error;
@@ -143,7 +145,7 @@ async function saveQuestions(questions) {
   for (const question of questions) {
     // Check if question already exists - use question text as a simple check
     const { data: existingQuestion, error: checkError } = await supabase
-      .from('trivia_questions')
+      .from('trivia_questions_duplicate')
       .select('id')
       .eq('question_text', question.question)
       .limit(1);
@@ -177,7 +179,7 @@ async function saveQuestions(questions) {
     
     // Insert question
     const { error } = await supabase
-      .from('trivia_questions')
+      .from('trivia_questions_duplicate')
       .insert({
         id: 'gen_' + Math.random().toString(36).substring(2, 10), // Generate a unique text ID
         question_text: questionText,
