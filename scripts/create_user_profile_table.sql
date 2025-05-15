@@ -30,11 +30,11 @@ CREATE POLICY "Allow users to insert their own profile" ON public.user_profiles
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO public.user_profiles (id, username, full_name, avatar_url)
+  INSERT INTO public.user_profiles (id, full_name, country, avatar_url)
   VALUES (
     NEW.id,
-    NEW.email,  -- Default username to email
-    NEW.raw_user_meta_data->>'full_name', -- Extract from metadata if available
+    UPPER(SUBSTRING(NEW.email, 1, 2)),  -- Extract first two letters from email and uppercase
+    'OT',  -- Set default country to "Other"
     NEW.raw_user_meta_data->>'avatar_url' -- Extract from metadata if available
   );
   RETURN NEW;

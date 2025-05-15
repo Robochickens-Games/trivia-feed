@@ -1,4 +1,4 @@
-import { categoryColors } from '../lib/colors';
+import { categoryColors, topicColors } from '../design/index';
 import { useTheme } from '../context/ThemeContext';
 import { ThemeDefinition } from '../design/themes';
 
@@ -34,32 +34,32 @@ export function useThemeColor(colorName: keyof ReturnType<typeof useDesignSystem
 }
 
 /**
- * Helper to get category-specific colors
+ * Helper to get topic-specific colors (preferred method)
  */
-export function getCategoryColor(category: string, theme?: ThemeDefinition): string {
+export function getTopicColor(category: string): string {
   // Use the imported colors or fall back to hard-coded values
-  if (categoryColors && typeof categoryColors === 'object') {
+  if (topicColors && typeof topicColors === 'object') {
     // Try to get direct match
-    if (categoryColors[category]) {
-      return categoryColors[category];
+    if (category in topicColors) {
+      return (topicColors as Record<string, string>)[category];
     }
     
     // Try to find a partial match
-    const partialMatch = Object.keys(categoryColors).find(key => 
+    const partialMatch = Object.keys(topicColors).find(key => 
       category.toLowerCase().includes(key.toLowerCase()) || 
       key.toLowerCase().includes(category.toLowerCase())
     );
     
     if (partialMatch) {
-      return categoryColors[partialMatch];
+      return (topicColors as Record<string, string>)[partialMatch];
     }
     
     // Return default color if no match found
-    return categoryColors.default || '#455A64';
+    return (topicColors as Record<string, string>)['default'] || '#455A64';
   }
   
   // Fall back to hard-coded values if import fails
-  const defaultCategoryColors: Record<string, string> = {
+  const defaultTopicColors: Record<string, string> = {
     'Music': '#6200EA',           // Deep Purple
     'Entertainment': '#FF4081',   // Pink
     'Science': '#00B8D4',         // Cyan  
@@ -70,20 +70,29 @@ export function getCategoryColor(category: string, theme?: ThemeDefinition): str
   };
   
   // Try to get direct match from fallback
-  if (defaultCategoryColors[category]) {
-    return defaultCategoryColors[category];
+  if (defaultTopicColors[category]) {
+    return defaultTopicColors[category];
   }
   
   // Try to find a partial match in fallback
-  const partialMatch = Object.keys(defaultCategoryColors).find(key => 
+  const partialMatch = Object.keys(defaultTopicColors).find(key => 
     category.toLowerCase().includes(key.toLowerCase()) || 
     key.toLowerCase().includes(category.toLowerCase())
   );
   
   if (partialMatch) {
-    return defaultCategoryColors[partialMatch];
+    return defaultTopicColors[partialMatch];
   }
   
   // Return default color if no match found
-  return defaultCategoryColors.default;
-} 
+  return defaultTopicColors.default;
+}
+
+/**
+ * Helper to get category-specific colors (legacy method)
+ * This is maintained for backward compatibility
+ */
+export function getCategoryColor(category: string, theme?: ThemeDefinition): string {
+  // Simply use getTopicColor for consistency
+  return getTopicColor(category);
+}

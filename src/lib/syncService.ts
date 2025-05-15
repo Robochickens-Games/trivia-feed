@@ -3,6 +3,7 @@ import { UserProfile } from './personalizationService';
 import { FeedChange, InteractionLog, WeightFactors, WeightChange } from '../types/trackerTypes';
 import { Platform } from 'react-native';
 import { EventEmitter } from 'events';
+import { syncUserProfile as simplifiedSyncUserProfile, fetchUserProfile as simplifiedFetchUserProfile } from './simplifiedSyncService';
 
 // Create a global event emitter for logging database operations
 export const dbEventEmitter = new EventEmitter();
@@ -72,201 +73,9 @@ const getDeviceId = () => {
  * Syncs the user profile data with Supabase
  */
 export async function syncUserProfile(userId: string, userProfile: UserProfile): Promise<void> {
-  try {
-    if (!userId) {
-      console.log('No user ID provided for sync');
-      return;
-    }
-
-    // Add null check for userProfile
-    if (!userProfile) {
-      console.log('User profile is null or undefined, cannot sync');
-      return;
-    }
-
-    console.log('Syncing user profile data for user:', userId);
-    
-    // First, check if profile exists
-    let existingProfile = null;
-    let fetchError = null;
-    
-    try {
-      const result = await supabase
-        .from('user_profile_data')
-        .select('version, last_refreshed')
-        .eq('id', userId)
-        .single();
-      
-      existingProfile = result.data;
-      fetchError = result.error;
-    } catch (supabaseError) {
-      console.error('Supabase request failed:', supabaseError);
-      return; // Exit early if the database query itself fails
-    }
-    
-    // Safely create the query object for logging
-    const queryObject = { 
-      id: userId, 
-      columns: ['version', 'last_refreshed'] 
-    };
-    
-    // Log the select operation
-    logDbOperation(
-      'sent', 
-      'user_profile_data', 
-      'select', 
-      1, 
-      { query: queryObject },
-      userId,
-      fetchError && fetchError.code !== 'PGRST116' ? 'error' : 'success',
-      fetchError?.message
-    );
-    
-    if (fetchError && fetchError.code !== 'PGRST116') { // Not found is ok
-      console.error('Error fetching profile data:', fetchError);
-      return;
-    }
-    
-    // Log the received data
-    if (existingProfile) {
-      logDbOperation(
-        'received', 
-        'user_profile_data', 
-        'select', 
-        1, 
-        existingProfile,
-        userId
-      );
-    }
-    
-    const deviceId = getDeviceId();
-    
-    if (!existingProfile) {
-      // Profile doesn't exist, create it
-      console.log('Creating new profile in database');
-      
-      // Ensure all properties exist and have default values
-      const profileData = {
-        id: userId,
-        topics: userProfile.topics || {},
-        cold_start_complete: userProfile.coldStartComplete || false,
-        total_questions_answered: userProfile.totalQuestionsAnswered || 0,
-        last_refreshed: userProfile.lastRefreshed || Date.now()
-      };
-      
-      try {
-        const { error: insertError } = await supabase
-          .from('user_profile_data')
-          .insert(profileData);
-        
-        // Log the insert operation
-        logDbOperation(
-          'sent', 
-          'user_profile_data', 
-          'insert', 
-          1, 
-          profileData,
-          userId,
-          insertError ? 'error' : 'success',
-          insertError?.message
-        );
-        
-        if (insertError) {
-          console.error('Error inserting profile data:', insertError);
-        }
-      } catch (insertError) {
-        console.error('Failed to insert profile:', insertError);
-      }
-    } else {
-      // Profile exists, check if we need to update
-      console.log('Existing profile found, checking if update needed');
-      
-      // Make sure lastRefreshed values are properly initialized
-      const localLastRefreshed = userProfile.lastRefreshed || 0;
-      const serverLastRefreshed = existingProfile.last_refreshed || 0;
-      
-      // Only update if our data is newer
-      if (localLastRefreshed > serverLastRefreshed) {
-        console.log('Local profile is newer, updating server');
-        
-        const updateData = {
-          topics: userProfile.topics || {},
-          cold_start_complete: userProfile.coldStartComplete || false,
-          total_questions_answered: userProfile.totalQuestionsAnswered || 0,
-          last_refreshed: localLastRefreshed,
-          version: (existingProfile.version || 0) + 1
-        };
-        
-        try {
-          const { error: updateError } = await supabase
-            .from('user_profile_data')
-            .update(updateData)
-            .eq('id', userId)
-            .eq('version', existingProfile.version || 0); // Optimistic concurrency control
-          
-          // Safely create query object for logging
-          const safeQueryObject = {
-            id: userId,
-            version: existingProfile.version || 0
-          };
-          
-          // Log the update operation - with safe objects
-          logDbOperation(
-            'sent', 
-            'user_profile_data', 
-            'update', 
-            1, 
-            { query: safeQueryObject, data: updateData },
-            userId,
-            updateError ? 'error' : 'success',
-            updateError?.message
-          );
-          
-          if (updateError) {
-            console.error('Error updating profile data:', updateError);
-            
-            // If error is due to concurrency violation, fetch latest and handle merge
-            if (updateError.code === '23514') { // Constraint violation
-              console.log('Concurrency conflict detected, handling merge');
-              await handleProfileMerge(userId, userProfile);
-            }
-          }
-        } catch (updateError) {
-          console.error('Failed to update profile:', updateError);
-        }
-      } else {
-        console.log('Server profile is newer, no update needed');
-      }
-    }
-  } catch (error) {
-    // Handle error safely to prevent Proxy handler is null errors
-    try {
-      // Structured error logging with safety checks
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-      const errorName = error instanceof Error ? error.name : 'UnknownError';
-      const errorStack = error instanceof Error ? error.stack : '';
-      
-      console.error('Error in syncUserProfile:', {
-        name: errorName,
-        message: errorMsg,
-        userId: userId || 'undefined',
-        hasUserProfile: userProfile ? 'yes' : 'no',
-        stackPreview: errorStack ? errorStack.split('\n').slice(0, 3).join('\n') : 'No stack trace'
-      });
-      
-      // Log the error for debugging
-      console.log('DEBUG: syncUserProfile execution failed. Context:', {
-        time: new Date().toISOString(),
-        userId: typeof userId === 'string' ? userId : 'invalid',
-        userProfileValid: userProfile !== null && userProfile !== undefined,
-        error: errorMsg
-      });
-    } catch (nestedError) {
-      // Ultimate fallback if even our error handling code fails
-      console.log('CRITICAL ERROR: Failed to handle error in syncUserProfile:', 
-        nestedError instanceof Error ? nestedError.message : 'Unknown nested error');
-    }
-  }
+  // Forward to the simplified sync service with a note
+  console.log('Using simplified sync service for user profile');
+  return simplifiedSyncUserProfile(userId, userProfile);
 }
 
 /**
@@ -473,61 +282,10 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile | nu
 /**
  * Syncs user interactions with Supabase
  */
-export async function syncUserInteractions(
-  userId: string, 
-  interactions: InteractionLog[]
-): Promise<void> {
-  try {
-    if (!userId || !interactions.length) {
-      return;
-    }
-
-    console.log(`Syncing ${interactions.length} user interactions`);
-    
-    const deviceId = getDeviceId();
-    
-    // Prepare interactions for insert
-    const formattedInteractions = interactions.map(interaction => ({
-      user_id: userId,
-      question_id: interaction.questionId,
-      timestamp: interaction.timestamp,
-      time_spent: interaction.timeSpent,
-      interaction_type: interaction.type,
-      question_text: interaction.questionText,
-      synced_from_device: deviceId
-    }));
-    
-    // Insert interactions, ignoring conflicts (we use a unique constraint)
-    const { error } = await supabase
-      .from('user_interactions')
-      .upsert(formattedInteractions, { 
-        onConflict: 'user_id,question_id,timestamp',
-        ignoreDuplicates: true
-      });
-    
-    // Log the upsert operation
-    logDbOperation(
-      'sent', 
-      'user_interactions', 
-      'upsert', 
-      interactions.length, 
-      { 
-        data: formattedInteractions,
-        options: { onConflict: 'user_id,question_id,timestamp', ignoreDuplicates: true }
-      },
-      userId,
-      error ? 'error' : 'success',
-      error?.message
-    );
-    
-    if (error) {
-      console.error('Error syncing interactions:', error);
-    } else {
-      console.log(`Successfully synced ${interactions.length} interactions`);
-    }
-  } catch (error) {
-    console.error('Error in syncUserInteractions:', error);
-  }
+export async function syncUserInteractions(userId: string, interactions: InteractionLog[]): Promise<void> {
+  // Do not actually sync to the deprecated table
+  console.log('DEPRECATED: syncUserInteractions called - ignored');
+  return;
 }
 
 /**
@@ -537,180 +295,19 @@ export async function fetchUserInteractions(
   userId: string,
   afterTimestamp?: number
 ): Promise<InteractionLog[]> {
-  try {
-    if (!userId) {
-      return [];
-    }
-
-    console.log('Fetching user interactions');
-    
-    let query = supabase
-      .from('user_interactions')
-      .select('*')
-      .eq('user_id', userId)
-      .order('timestamp', { ascending: false });
-    
-    // If afterTimestamp is provided, only get newer interactions
-    if (afterTimestamp) {
-      query = query.gt('timestamp', afterTimestamp);
-    }
-    
-    // Log the select operation
-    logDbOperation(
-      'sent', 
-      'user_interactions', 
-      'select', 
-      1, 
-      { 
-        query: { user_id: userId, timestamp: afterTimestamp ? `>${afterTimestamp}` : undefined },
-        options: { order: 'timestamp', ascending: false }
-      },
-      userId
-    );
-    
-    const { data, error } = await query;
-    
-    if (error) {
-      // Update log with error
-      logDbOperation(
-        'sent', 
-        'user_interactions', 
-        'select', 
-        0, 
-        { query: { user_id: userId, timestamp: afterTimestamp ? `>${afterTimestamp}` : undefined } },
-        userId,
-        'error',
-        error.message
-      );
-      
-      console.error('Error fetching interactions:', error);
-      return [];
-    }
-    
-    if (!data || !data.length) {
-      console.log('No interactions found');
-      return [];
-    }
-    
-    // Log the received data
-    logDbOperation(
-      'received', 
-      'user_interactions', 
-      'select', 
-      data.length, 
-      data,
-      userId
-    );
-    
-    // Map the database format to our app format
-    return data.map((item: any) => ({
-      timestamp: item.timestamp,
-      type: item.interaction_type as 'correct' | 'incorrect' | 'skipped',
-      questionId: item.question_id,
-      timeSpent: item.time_spent,
-      questionText: item.question_text || `Question ${item.question_id}`
-    }));
-  } catch (error) {
-    console.error('Error in fetchUserInteractions:', error);
-    return [];
-  }
+  // Do not actually fetch from the deprecated table
+  console.log('DEPRECATED: fetchUserInteractions called - returning empty array');
+  return [];
 }
 
 /**
  * Syncs feed changes with Supabase
  * With aggressive optimization to minimize database growth
  */
-export async function syncFeedChanges(
-  userId: string, 
-  feedChanges: FeedChange[]
-): Promise<void> {
-  try {
-    if (!userId || !feedChanges.length) {
-      return;
-    }
-
-    // More aggressive filtering: 
-    // 1. Skip small batches entirely
-    if (feedChanges.length < 10) {
-      console.log(`Skipping sync of only ${feedChanges.length} feed changes (minimum 10)`);
-      return;
-    }
-    
-    // 2. Deduplicate the feed changes before sending
-    const uniqueChanges = feedChanges.reduce((unique: FeedChange[], change) => {
-      // Check if we already have a similar change
-      const exists = unique.some(
-        c => c.itemId === change.itemId && 
-             c.type === change.type &&
-             Math.abs(c.timestamp - change.timestamp) < 5000 // Within 5 seconds
-      );
-      
-      if (!exists) {
-        unique.push(change);
-      }
-      return unique;
-    }, []);
-    
-    // 3. After deduplication, check if we still have enough changes
-    if (uniqueChanges.length < 5) {
-      console.log(`Skipping sync after deduplication: only ${uniqueChanges.length} unique changes`);
-      return;
-    }
-
-    console.log(`Syncing ${uniqueChanges.length} unique feed changes (from original ${feedChanges.length})`);
-    
-    const deviceId = getDeviceId();
-    
-    // 4. Prepare feed changes with minimal data storage
-    const formattedChanges = uniqueChanges.map(change => ({
-      user_id: userId,
-      timestamp: change.timestamp,
-      change_type: change.type,
-      item_id: change.itemId,
-      question_text: change.questionText?.substring(0, 100) || '', // Limit text length
-      // Maximum 1 explanation, truncated to 100 chars
-      explanations: change.explanations?.slice(0, 1).map(e => e.substring(0, 100)) || [],
-      // Minimal weight factors
-      weight_factors: change.weightFactors ? {
-        category: change.weightFactors.category
-      } : null,
-      synced_from_device: deviceId
-    }));
-    
-    // Insert feed changes
-    const { error } = await supabase
-      .from('user_feed_changes')
-      .insert(formattedChanges);
-    
-    // Log the insert operation
-    logDbOperation(
-      'sent', 
-      'user_feed_changes', 
-      'insert', 
-      formattedChanges.length, 
-      formattedChanges,
-      userId,
-      error ? 'error' : 'success',
-      error?.message
-    );
-    
-    if (error) {
-      console.error('Error syncing feed changes:', error);
-    } else {
-      console.log(`Successfully synced ${formattedChanges.length} feed changes`);
-      
-      // 5. Run cleanup periodically after successfully syncing
-      // This helps maintain database size without requiring app restart
-      if (Math.random() < 0.1) { // 10% chance to run cleanup
-        console.log('Running post-sync feed changes cleanup');
-        cleanupFeedChanges(userId).catch(err => 
-          console.error('Error in post-sync cleanup:', err)
-        );
-      }
-    }
-  } catch (error) {
-    console.error('Error in syncFeedChanges:', error);
-  }
+export async function syncFeedChanges(userId: string, feedChanges: FeedChange[]): Promise<void> {
+  // Do not actually sync to the deprecated table
+  console.log('DEPRECATED: syncFeedChanges called - ignored');
+  return;
 }
 
 /**
@@ -720,147 +317,18 @@ export async function fetchFeedChanges(
   userId: string,
   afterTimestamp?: number
 ): Promise<FeedChange[]> {
-  try {
-    if (!userId) {
-      return [];
-    }
-
-    console.log('Fetching feed changes');
-    
-    let query = supabase
-      .from('user_feed_changes')
-      .select('*')
-      .eq('user_id', userId)
-      .order('timestamp', { ascending: false })
-      .limit(100); // Limit to most recent 100 records to improve performance
-    
-    // If afterTimestamp is provided, only get newer changes
-    if (afterTimestamp) {
-      query = query.gt('timestamp', afterTimestamp);
-    }
-    
-    // Log the select operation
-    logDbOperation(
-      'sent', 
-      'user_feed_changes', 
-      'select', 
-      1, 
-      { 
-        query: { user_id: userId, timestamp: afterTimestamp ? `>${afterTimestamp}` : undefined },
-        options: { order: 'timestamp', ascending: false, limit: 100 } 
-      },
-      userId
-    );
-    
-    const { data, error } = await query;
-    
-    if (error) {
-      // Update log with error
-      logDbOperation(
-        'sent', 
-        'user_feed_changes', 
-        'select', 
-        0, 
-        { query: { user_id: userId, timestamp: afterTimestamp ? `>${afterTimestamp}` : undefined } },
-        userId,
-        'error',
-        error.message
-      );
-      
-      console.error('Error fetching feed changes:', error);
-      return [];
-    }
-    
-    if (!data || !data.length) {
-      console.log('No feed changes found');
-      return [];
-    }
-    
-    // Log the received data
-    logDbOperation(
-      'received', 
-      'user_feed_changes', 
-      'select', 
-      data.length, 
-      data,
-      userId
-    );
-    
-    // Map the database format to our app format
-    return data.map((item: any) => ({
-      timestamp: item.timestamp,
-      type: item.change_type as 'added' | 'removed',
-      itemId: item.item_id,
-      questionText: item.question_text || `Question ${item.item_id}`,
-      explanations: item.explanations || [],
-      weightFactors: item.weight_factors
-    }));
-  } catch (error) {
-    console.error('Error in fetchFeedChanges:', error);
-    return [];
-  }
+  // Do not actually fetch from the deprecated table
+  console.log('DEPRECATED: fetchFeedChanges called - returning empty array');
+  return [];
 }
 
 /**
  * Syncs user weight changes with Supabase
  */
-export async function syncWeightChanges(
-  userId: string, 
-  weightChanges: WeightChange[]
-): Promise<void> {
-  try {
-    if (!userId || !weightChanges.length) {
-      return;
-    }
-
-    console.log(`Syncing ${weightChanges.length} weight changes`);
-    
-    const deviceId = getDeviceId();
-    
-    // Prepare weight changes for insert
-    const formattedChanges = weightChanges.map(change => ({
-      user_id: userId,
-      timestamp: change.timestamp,
-      question_id: change.questionId,
-      interaction_type: change.interactionType,
-      question_text: change.questionText,
-      category: change.category,
-      subtopic: change.subtopic,
-      branch: change.branch,
-      old_topic_weight: change.oldWeights.topicWeight,
-      old_subtopic_weight: change.oldWeights.subtopicWeight,
-      old_branch_weight: change.oldWeights.branchWeight,
-      new_topic_weight: change.newWeights.topicWeight,
-      new_subtopic_weight: change.newWeights.subtopicWeight,
-      new_branch_weight: change.newWeights.branchWeight,
-      synced_from_device: deviceId
-    }));
-    
-    // Insert weight changes
-    const { error } = await supabase
-      .from('user_weight_changes')
-      .insert(formattedChanges);
-    
-    // Log the insert operation
-    logDbOperation(
-      'sent', 
-      'user_weight_changes', 
-      'insert', 
-      weightChanges.length, 
-      formattedChanges,
-      userId,
-      error ? 'error' : 'success',
-      error?.message
-    );
-    
-    if (error) {
-      console.error('Error syncing weight changes:', error);
-    } else {
-      console.log(`Successfully synced ${weightChanges.length} weight changes`);
-    }
-  } catch (error) {
-    console.error('Error in syncWeightChanges:', error);
-  }
+export async function syncWeightChanges(userId: string, weightChanges: WeightChange[]): Promise<void> {
+  // Do not actually sync to the deprecated table
+  console.log('DEPRECATED: syncWeightChanges called - ignored');
+  return;
 }
 
 /**
@@ -870,95 +338,9 @@ export async function fetchWeightChanges(
   userId: string,
   afterTimestamp?: number
 ): Promise<WeightChange[]> {
-  try {
-    if (!userId) {
-      return [];
-    }
-
-    console.log('Fetching weight changes');
-    
-    let query = supabase
-      .from('user_weight_changes')
-      .select('*')
-      .eq('user_id', userId)
-      .order('timestamp', { ascending: false });
-    
-    // If afterTimestamp is provided, only get newer changes
-    if (afterTimestamp) {
-      query = query.gt('timestamp', afterTimestamp);
-    }
-    
-    // Log the select operation
-    logDbOperation(
-      'sent', 
-      'user_weight_changes', 
-      'select', 
-      1, 
-      { 
-        query: { user_id: userId, timestamp: afterTimestamp ? `>${afterTimestamp}` : undefined },
-        options: { order: 'timestamp', ascending: false } 
-      },
-      userId
-    );
-    
-    const { data, error } = await query;
-    
-    if (error) {
-      // Update log with error
-      logDbOperation(
-        'sent', 
-        'user_weight_changes', 
-        'select', 
-        0, 
-        { query: { user_id: userId, timestamp: afterTimestamp ? `>${afterTimestamp}` : undefined } },
-        userId,
-        'error',
-        error.message
-      );
-      
-      console.error('Error fetching weight changes:', error);
-      return [];
-    }
-    
-    if (!data || !data.length) {
-      console.log('No weight changes found');
-      return [];
-    }
-    
-    // Log the received data
-    logDbOperation(
-      'received', 
-      'user_weight_changes', 
-      'select', 
-      data.length, 
-      data,
-      userId
-    );
-    
-    // Map the database format to our app format
-    return data.map((item: any) => ({
-      timestamp: item.timestamp,
-      questionId: item.question_id,
-      interactionType: item.interaction_type as 'correct' | 'incorrect' | 'skipped',
-      questionText: item.question_text,
-      category: item.category,
-      subtopic: item.subtopic,
-      branch: item.branch,
-      oldWeights: {
-        topicWeight: item.old_topic_weight,
-        subtopicWeight: item.old_subtopic_weight,
-        branchWeight: item.old_branch_weight
-      },
-      newWeights: {
-        topicWeight: item.new_topic_weight,
-        subtopicWeight: item.new_subtopic_weight,
-        branchWeight: item.new_branch_weight
-      }
-    }));
-  } catch (error) {
-    console.error('Error in fetchWeightChanges:', error);
-    return [];
-  }
+  // Do not actually fetch from the deprecated table
+  console.log('DEPRECATED: fetchWeightChanges called - returning empty array');
+  return [];
 }
 
 /**
@@ -971,76 +353,21 @@ export async function loadUserData(userId: string): Promise<{
   feedChanges: FeedChange[];
   weightChanges: WeightChange[];
 }> {
+  console.log('Redirecting to simplified service for loading user data');
+  
   try {
-    console.log('Loading all user data for user:', userId);
+    // Forward to simplified service to get the profile
+    const profile = await simplifiedFetchUserProfile(userId);
     
-    // Log the initial load operation
-    logDbOperation(
-      'sent', 
-      'user_data', 
-      'select', 
-      1, 
-      { action: 'comprehensive_load', userId },
-      userId
-    );
-    
-    // Load user profile
-    const profile = await fetchUserProfile(userId);
-    
-    // Load user interactions
-    const interactions = await fetchUserInteractions(userId);
-    
-    // Load feed changes
-    const feedChanges = await fetchFeedChanges(userId);
-    
-    // Load weight changes
-    const weightChanges = await fetchWeightChanges(userId);
-    
-    // Log successful loading
-    logDbOperation(
-      'received', 
-      'user_data', 
-      'select', 
-      1, 
-      {
-        action: 'comprehensive_load',
-        userId,
-        stats: {
-          profile: profile ? 'loaded' : 'not found',
-          interactions: interactions.length,
-          feedChanges: feedChanges.length,
-          weightChanges: weightChanges.length
-        }
-      },
-      userId
-    );
-    
-    console.log(`Successfully loaded user data: 
-      Profile: ${profile ? 'Found' : 'Not found'}
-      Interactions: ${interactions.length}
-      Feed Changes: ${feedChanges.length}
-      Weight Changes: ${weightChanges.length}`);
-    
+    // Return with empty arrays for the deprecated data
     return {
       profile,
-      interactions,
-      feedChanges,
-      weightChanges
+      interactions: [],
+      feedChanges: [],
+      weightChanges: []
     };
   } catch (error) {
     console.error('Error loading user data:', error);
-    
-    // Log the error
-    logDbOperation(
-      'sent', 
-      'user_data', 
-      'select', 
-      1, 
-      { action: 'comprehensive_load', userId, error: error instanceof Error ? error.message : 'Unknown error' },
-      userId,
-      'error',
-      error instanceof Error ? error.message : 'Unknown error'
-    );
     
     // Return empty data as fallback
     return {

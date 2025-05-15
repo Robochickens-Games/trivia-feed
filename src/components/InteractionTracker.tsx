@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, StyleSheet, ScrollView, TouchableOpacity, Platform, Animated, Easing } from 'react-native';
+import { View, StyleSheet, ScrollView, TouchableOpacity, Platform, Animated, Easing, Alert, TextInput } from 'react-native';
 import { useAppSelector, useAppDispatch } from '../store/hooks';
 import { Feather } from '@expo/vector-icons';
 import { ThemedText } from '@/components/ThemedText';
@@ -7,10 +7,9 @@ import { ThemedView } from '@/components/ThemedView';
 import { FeedItem } from '../lib/triviaService';
 import { dbEventEmitter } from '../lib/syncService';
 import { WeightChange } from '../types/trackerTypes';
-import { fetchWeightChanges } from '../lib/syncService';
-import { loadUserDataThunk } from '../store/thunks';
 import { useAuth } from '../context/AuthContext';
 import { getDatabaseInfo, attemptDatabaseFix } from '../lib/databaseDebugger';
+import { fetchUserProfile } from '../lib/simplifiedSyncService';
 
 interface InteractionLog {
   timestamp: number;
@@ -35,7 +34,7 @@ interface FeedChange {
   questionText: string;
   explanations: string[];
   weightFactors?: {
-    category: string;
+    topic: string;
     topicWeight?: number;
     subtopicWeight?: number;
     preferenceReason?: string;
@@ -74,6 +73,62 @@ interface InteractionTrackerProps {
   debugEnabled?: boolean;
 }
 
+// Add the tableColors function at the top of the file after the interfaces
+const tableColors: { [key: string]: string } = {
+  'user_profile_data': '#4CAF50',      // Green
+  'auth.users': '#607D8B',             // Blue Grey
+  'questions': '#E91E63',              // Pink
+};
+
+const getOperationColor = (operation: string): string => {
+  switch (operation.toLowerCase()) {
+    case 'select': return '#2196F3';   // Blue
+    case 'insert': return '#4CAF50';   // Green
+    case 'update': return '#FF9800';   // Orange
+    case 'delete': return '#F44336';   // Red
+    case 'upsert': return '#9C27B0';   // Purple
+    default: return '#607D8B';         // Blue Grey
+  }
+};
+
+// Add this new function after the getOperationColor function around line 84
+const getActionType = (operation: DbOperation): string => {
+  // Check the operation type and data to determine what kind of action is happening
+  
+  // For user_profile_data operations, look at the specific columns changed
+  if (operation.table === 'user_profile_data') {
+    if (operation.data) {
+      // Check which column is being modified
+      if (operation.data.topics) {
+        return "Topics";
+      } else if (operation.data.interactions) {
+        return "Interactions";
+      } else if (operation.data.feed_data) {
+        return "Feed";
+      } else if (operation.data.preferences) {
+        return "Preferences";
+      } else if (operation.operation === 'select') {
+        return "Refreshed";
+      }
+    }
+    return "Profile";
+  } 
+  
+  // For other tables, use table name to determine action type
+  else if (operation.table === 'questions') {
+    return "Questions";
+  } else if (operation.table === 'auth.users') {
+    return "Auth";
+  } else if (operation.table.includes('feed')) {
+    return "Feed";
+  } else if (operation.table.includes('interaction')) {
+    return "Interactions";
+  }
+  
+  // Default fallback
+  return operation.operation === 'select' ? "Refreshed" : "Unknown";
+};
+
 export function InteractionTracker({ feedData = [], debugEnabled = false }: InteractionTrackerProps) {
   // Only render the component when debug is enabled
   if (!debugEnabled) {
@@ -103,6 +158,30 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
     totalTime: 0,
     avgTime: 0,
   });
+  
+  // Add state for copy functionality
+  const [showCopyUI, setShowCopyUI] = useState(false);
+  const [copyText, setCopyText] = useState("");
+  
+  // Helper to check if a weight value is the default (0.5)
+  const isDefaultWeight = (value: number): boolean => {
+    // Be more forgiving with the default check - anything close to 0.5 should be considered default
+    // This helps with float precision issues and makes the display more consistent
+    return Math.abs(value - 0.5) < 0.05;
+  };
+
+  // Helper to format weight display with indicator for default values
+  const formatWeight = (value: number): string => {
+    // Always use 2 decimal places for consistency
+    const formatted = value.toFixed(2);
+    
+    // If it's very close to 0.5, explicitly show it as 0.50 (default)
+    if (isDefaultWeight(value)) {
+      return `0.50 (default)`;
+    }
+    
+    return formatted;
+  };
   
   // Add animation for the toggle button
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -134,98 +213,32 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
   
   // Function to load weights from database
   const loadWeightsFromDB = async () => {
+    // DISABLED: No longer fetch weights directly from DB
+    // This is now handled exclusively by SimplifiedSyncManager
+    console.log('InteractionTracker: loadWeightsFromDB has been DISABLED');
+    console.log('InteractionTracker: All database access is now handled by SimplifiedSyncManager');
+    
     if (user?.id) {
       try {
         setIsLoadingWeights(true);
-        console.log('InteractionTracker: Fetching user data from database for user:', user.id);
         
-        // Log current profile state
-        console.log('InteractionTracker: Before fetch - current user profile state:', {
+        // Just log current profile state but don't fetch
+        console.log('InteractionTracker: Using current Redux state:', {
           topicCount: Object.keys(userProfile.topics || {}).length,
-          lastRefreshed: userProfile.lastRefreshed,
           coldStartComplete: userProfile.coldStartComplete,
-          totalQuestionsAnswered: userProfile.totalQuestionsAnswered,
+          lastRefreshed: userProfile.lastRefreshed
+            ? new Date(userProfile.lastRefreshed).toISOString()
+            : 'none'
         });
         
-        // Fetch the latest data by dispatching the thunk - store the result directly for verification
-        const userData = await dispatch(loadUserDataThunk(user.id)) as any;
-        // The result may be directly available, or inside a fulfilled property depending on thunk middleware version
-        const result = userData.payload || userData;
-        
-        console.log('InteractionTracker: Data received from loadUserDataThunk:', {
-          profileReceived: !!(result.profile),
-          weightChangesCount: result.weightChanges?.length || 0,
-          interactionsCount: result.interactions?.length || 0,
-          feedChangesCount: result.feedChanges?.length || 0,
-        });
-        
-        if (result.profile) {
-          // Check if topics is null or undefined, and provide a default empty object
-          const topics = result.profile.topics || {};
-          console.log('InteractionTracker: Profile data from DB:', {
-            topicCount: Object.keys(topics).length,
-            topicsIsNull: result.profile.topics === null,
-            topicsIsUndefined: result.profile.topics === undefined,
-            topicsDataType: typeof result.profile.topics,
-            lastRefreshed: result.profile.lastRefreshed,
-            coldStartComplete: result.profile.coldStartComplete,
-            totalQuestionsAnswered: result.profile.totalQuestionsAnswered,
-          });
-          
-          // If topics is empty in result.profile but we have local topics, consider pushing local data to server
-          if (Object.keys(topics).length === 0 && Object.keys(userProfile.topics || {}).length > 0) {
-            console.log('InteractionTracker: DB topics empty but local topics exist. Consider syncing local to server.');
-            
-            // Import the required function
-            const { syncUserProfile } = await import('../lib/syncService');
-            
-            // Force sync local profile to server
-            try {
-              await syncUserProfile(user.id, userProfile);
-              console.log('InteractionTracker: Force synced local topics to server');
-            } catch (syncError) {
-              console.error('InteractionTracker: Error syncing local topics to server:', syncError);
-            }
-          }
-        }
-        
-        // Direct fetch from API if we need a backup approach
-        if (!result.profile || !result.profile.topics || Object.keys(result.profile.topics || {}).length === 0) {
-          console.log('InteractionTracker: No profile data from thunk, trying direct fetch...');
-          
-          // Import the required function
-          const { fetchUserProfile, fetchWeightChanges } = await import('../lib/syncService');
-          
-          // Direct API calls as backup
-          const directProfile = await fetchUserProfile(user.id);
-          const directWeightChanges = await fetchWeightChanges(user.id);
-          
-          console.log('InteractionTracker: Direct API fetch results:', {
-            profileReceived: !!directProfile,
-            topicCount: directProfile ? Object.keys(directProfile.topics || {}).length : 0,
-            weightChangesCount: directWeightChanges.length
-          });
-        }
-        
-        // Update our timestamp regardless
+        // Set the updated timestamp without actually fetching
         setLastWeightUpdateTime(Date.now());
         
-        // Log the current state of Redux store after thunk
-        const currentProfileState = userProfile;
-        console.log('InteractionTracker: After fetch - Redux profile state:', {
-          topicCount: Object.keys(currentProfileState.topics || {}).length,
-          lastRefreshed: currentProfileState.lastRefreshed,
-          syncedWeightChangesCount: syncedWeightChanges.length
-        });
-        
-        console.log('InteractionTracker: Successfully loaded user data from database');
+        setIsLoadingWeights(false);
       } catch (error) {
-        console.error('InteractionTracker: Error loading user data:', error);
-      } finally {
+        console.error('InteractionTracker: Error in weights observer:', error);
         setIsLoadingWeights(false);
       }
-    } else {
-      console.log('InteractionTracker: No user logged in, skipping data fetch');
     }
   };
   
@@ -254,17 +267,17 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
           
           // Extract weight-based selection info
           const weightFactors: FeedChange['weightFactors'] = {
-            category: item.category,
+            topic: item.topic,
           };
           
           // Check if there's a topic weight in user profile for this category
-          if (userProfile.topics && userProfile.topics[item.category]) {
-            weightFactors.topicWeight = userProfile.topics[item.category].weight;
+          if (userProfile.topics && userProfile.topics[item.topic]) {
+            weightFactors.topicWeight = userProfile.topics[item.topic].weight;
             
             // Check if there's a subtopic weight
             const subtopic = item.tags?.[0] || 'General';
-            if (userProfile.topics[item.category].subtopics?.[subtopic]) {
-              weightFactors.subtopicWeight = userProfile.topics[item.category].subtopics[subtopic].weight;
+            if (userProfile.topics[item.topic].subtopics?.[subtopic]) {
+              weightFactors.subtopicWeight = userProfile.topics[item.topic].subtopics[subtopic].weight;
             }
           }
           
@@ -405,16 +418,17 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
   useEffect(() => {
     // Add listener for database operations
     const handleDbOperation = (operation: DbOperation) => {
-      // Filter operations for user_feed_changes table to reduce noise
-      if (operation.table === 'user_feed_changes') {
-        // Only track operations with significant record count for feed changes
-        if (operation.records > 5 || operation.operation !== 'insert') {
-          setDbOperations(prev => [operation, ...prev].slice(0, 50)); // Limit to 50 operations for feed changes
-        }
-      } else {
-        // For other tables: keep more detailed history
-        setDbOperations(prev => [operation, ...prev].slice(0, 100));
+      // Skip deprecated tables completely
+      if (
+        operation.table === 'user_feed_changes' || 
+        operation.table === 'user_interactions' || 
+        operation.table === 'user_weight_changes'
+      ) {
+        return; // Don't track operations on deprecated tables
       }
+      
+      // For allowed tables: keep detailed history
+        setDbOperations(prev => [operation, ...prev].slice(0, 100));
     };
     
     dbEventEmitter.on('db-operation', handleDbOperation);
@@ -586,26 +600,23 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
     parentTopic?: string, 
     parentSubtopic?: string
   ): number => {
-    // Look at the most recent weight changes (last 5)
-    const recentChanges = weightChanges
-      .filter(change => {
-        if (type === 'topic') {
-          return change.category === name;
-        } else if (type === 'subtopic') {
-          return change.category === parentTopic && change.subtopic === name;
-        } else {
-          return change.category === parentTopic && 
-                change.subtopic === parentSubtopic && 
-                change.branch === name;
-        }
-      })
-      .slice(-5); // Get the most recent 5 changes
+    // Filter to relevant weight changes
+    const relevantChanges = weightChanges.filter(change => {
+      if (type === 'topic') {
+        return change.topic === name;
+      } else if (type === 'subtopic') {
+        return change.topic === parentTopic && change.subtopic === name;
+      } else {
+        return change.topic === parentTopic &&
+          change.subtopic === parentSubtopic;
+      }
+    });
     
-    if (recentChanges.length === 0) return 0;
+    if (relevantChanges.length === 0) return 0;
     
     // Calculate the trend as the sum of recent changes
     let trend = 0;
-    recentChanges.forEach(change => {
+    relevantChanges.forEach(change => {
       if (type === 'topic') {
         trend += change.newWeights.topicWeight - change.oldWeights.topicWeight;
       } else if (type === 'subtopic' && change.newWeights.subtopicWeight !== undefined && 
@@ -822,7 +833,7 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                     <View style={styles.weightFactorsContainer}>
                       <ThemedText style={styles.explanationHeader}>Selection Factors:</ThemedText>
                       <ThemedText style={styles.weightFactorText}>
-                        • Category: <ThemedText style={styles.weightValue}>{change.weightFactors.category}</ThemedText>
+                        • Category: <ThemedText style={styles.weightValue}>{change.weightFactors.topic}</ThemedText>
                       </ThemedText>
                       
                       {change.weightFactors.topicWeight !== undefined && (
@@ -874,7 +885,7 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                 <View key={index} style={styles.feedItem}>
                   <View style={styles.feedItemHeader}>
                     <ThemedText style={styles.feedItemNumber}>#{index + 1}</ThemedText>
-                    <ThemedText style={styles.feedItemCategory}>{item.category || 'Unknown'}</ThemedText>
+                    <ThemedText style={styles.feedItemTopic}>{item.topic || 'Unknown'}</ThemedText>
                   </View>
                   <ThemedText style={styles.feedItemText}>{item.question || `Question ${item.id.substring(0, 5)}...`}</ThemedText>
                   {item.tags && item.tags.length > 0 && (
@@ -906,22 +917,38 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                           ))}
                           
                           {/* Add weight-based info for each feed item */}
-                          {userProfile.topics && userProfile.topics[item.category] && (
+                          {userProfile.topics && userProfile.topics[item.topic] && (
                             <>
                               <ThemedText style={[styles.explanationHeader, {marginTop: 8}]}>
                                 Weight Factors:
                               </ThemedText>
                               <ThemedText style={styles.explanationText}>
-                                • Topic weight: {userProfile.topics[item.category].weight.toFixed(2)}
+                                • Topic: <ThemedText style={styles.weightValue}>{userProfile.topics[item.topic].weight.toFixed(2)}</ThemedText>
                               </ThemedText>
                               
                               {item.tags && item.tags[0] && 
-                               userProfile.topics[item.category].subtopics && 
-                               userProfile.topics[item.category].subtopics[item.tags[0]] && (
+                               userProfile.topics[item.topic].subtopics && 
+                               userProfile.topics[item.topic].subtopics[item.tags[0]] && (
                                 <ThemedText style={styles.explanationText}>
                                   • Subtopic weight: {
-                                    userProfile.topics[item.category].subtopics[item.tags[0]].weight.toFixed(2)
+                                    userProfile.topics[item.topic].subtopics[item.tags[0]].weight.toFixed(2)
                                   }
+                                </ThemedText>
+                              )}
+                              
+                              {/* Add the question type (preference vs exploration) */}
+                              <ThemedText style={styles.explanationText}>
+                                • Question type: {
+                                  feedExplanations[item.id]?.some(exp => exp.includes('Exploration question')) 
+                                    ? 'Exploration' 
+                                    : 'Preferred'
+                                }
+                              </ThemedText>
+                                
+                              {/* Add the selection mechanism */}
+                              {feedExplanations[item.id]?.find(exp => exp.includes('Selection mechanism:')) && (
+                                <ThemedText style={styles.explanationText}>
+                                  • {feedExplanations[item.id].find(exp => exp.includes('Selection mechanism:'))?.replace('Selection mechanism: ', '')}
                                 </ThemedText>
                               )}
                             </>
@@ -970,6 +997,56 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
     };
   };
 
+  // Function to prepare DB operations text - moved to component level
+  const prepareDbOperationsText = () => {
+    // Get the operations to display
+    const filteredOperations = tableFilter 
+      ? dbOperations.filter(op => op.table.includes(tableFilter)) 
+      : dbOperations;
+    
+    const recordsToDisplay = showAllRecords 
+      ? filteredOperations 
+      : filteredOperations.slice(0, visibleDbRecords);
+      
+    try {
+      // Format operations as text
+      let text = "DATABASE OPERATIONS LOG\n\n";
+      
+      if (recordsToDisplay.length === 0) {
+        text += "No database operations to display.";
+      } else {
+        recordsToDisplay.forEach((op, index) => {
+          const timestamp = formatTimestamp(op.timestamp);
+          const actionType = getActionType(op);
+          text += `--- OPERATION ${index + 1} ---\n`;
+          text += `Time: ${timestamp}\n`;
+          text += `Direction: ${op.direction}\n`;
+          text += `Table: ${op.table}\n`;
+          text += `Action: ${actionType}\n`;
+          text += `Operation: ${op.operation}\n`;
+          text += `Records: ${op.records}\n`;
+          text += `Status: ${op.status}\n`;
+          text += `Data: ${JSON.stringify(op.data, null, 2)}\n\n`;
+        });
+      }
+      
+      // Set the text to be displayed in the TextInput
+      setCopyText(text);
+      // Show the copy UI
+      setShowCopyUI(true);
+      
+      // Provide feedback
+      Alert.alert(
+        "Copy Instructions", 
+        "1. Tap inside the text box\n2. Select all text (long-press → Select All)\n3. Copy to clipboard (long-press → Copy)",
+        [{ text: "OK" }]
+      );
+    } catch (error) {
+      console.error("Failed to generate DB operations log:", error);
+      Alert.alert("Error", "Failed to generate DB operations log");
+    }
+  };
+
   // Render the database operations log tab
   const renderDbLogTab = () => {
     const stats = getDbStats();
@@ -984,79 +1061,341 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
       ? filteredOperations 
       : filteredOperations.slice(0, visibleDbRecords);
     
+    // Detect active syncing
+    const activeSyncing = dbOperations.length > 0 && 
+      Date.now() - dbOperations[0].timestamp < 5000 && 
+      dbOperations[0].direction === 'sent';
+    
     return (
       <ScrollView style={styles.scrollView}>
-        {/* Summary statistics */}
+        {/* Copy UI that appears when user wants to copy */}
+        {showCopyUI && (
+          <View style={{
+            padding: 12,
+            backgroundColor: '#f5f5f5',
+            borderRadius: 8,
+            marginBottom: 12,
+            borderWidth: 1,
+            borderColor: '#ddd',
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 2 },
+            shadowOpacity: 0.1,
+            shadowRadius: 4,
+            elevation: 2,
+          }}>
+            <View style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 12,
+            }}>
+              <ThemedText style={{fontWeight: 'bold', fontSize: 16, color: '#333333'}}>
+                DB Log Contents
+              </ThemedText>
+              <TouchableOpacity 
+                onPress={() => setShowCopyUI(false)}
+                style={{
+                  backgroundColor: '#ff5252',
+                  paddingHorizontal: 10,
+                  paddingVertical: 4,
+                  borderRadius: 4,
+                }}
+              >
+                <ThemedText style={{color: 'white', fontSize: 12, fontWeight: 'bold'}}>Close</ThemedText>
+              </TouchableOpacity>
+            </View>
+            
+            <View style={{
+              backgroundColor: '#333',
+              padding: 8,
+              borderRadius: 6,
+              marginBottom: 10,
+            }}>
+              <ThemedText style={{color: '#fff', fontSize: 13, fontWeight: '500'}}>
+                Instructions:
+              </ThemedText>
+              <ThemedText style={{color: '#fff', fontSize: 12, marginTop: 4}}>
+                1. Tap and hold inside the text area below
+              </ThemedText>
+              <ThemedText style={{color: '#fff', fontSize: 12, marginTop: 2}}>
+                2. Select "Select All" from the menu
+              </ThemedText>
+              <ThemedText style={{color: '#fff', fontSize: 12, marginTop: 2}}>
+                3. Select "Copy" from the menu
+              </ThemedText>
+            </View>
+            
+            <View style={{
+              borderWidth: 2,
+              borderColor: '#0A7EA4',
+              borderRadius: 6,
+              overflow: 'hidden',
+            }}>
+              <ScrollView style={{height: 220}} nestedScrollEnabled={true}>
+                <TextInput
+                  style={{
+                    minHeight: 220,
+                    padding: 10,
+                    backgroundColor: '#fff',
+                    color: '#333',
+                    fontSize: 12,
+                    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                    textAlignVertical: 'top',
+                  }}
+                  value={copyText}
+                  multiline={true}
+                  scrollEnabled={true}
+                  editable={true}
+                  selectTextOnFocus={true}
+                />
+              </ScrollView>
+            </View>
+            
+            <TouchableOpacity 
+              style={{
+                backgroundColor: '#4CAF50',
+                padding: 10,
+                borderRadius: 6,
+                alignItems: 'center',
+                marginTop: 10,
+              }}
+              onPress={() => {
+                // Attempt to select all text programmatically (may not work on all platforms)
+                // This is a fallback in case the user can't select manually
+                Alert.alert(
+                  "Manual Copy Required",
+                  "Please use your device's built-in text selection and copy functions",
+                  [{ text: "OK" }]
+                );
+              }}
+            >
+              <ThemedText style={{color: 'white', fontWeight: 'bold'}}>
+                Select All Text
+              </ThemedText>
+            </TouchableOpacity>
+          </View>
+        )}
+        
+        {/* Enhanced Summary statistics */}
         <ThemedView style={styles.statsCard}>
-          <ThemedText style={styles.statsCardTitle}>Database Operations Summary</ThemedText>
-          
-          <View style={styles.statsRow}>
-            <View style={styles.statItem}>
-              <ThemedText style={styles.statValue}>{stats.totalOperations}</ThemedText>
-              <ThemedText style={styles.statLabel}>Total</ThemedText>
-            </View>
-            <View style={styles.statItem}>
-              <ThemedText style={[styles.statValue, styles.sentText]}>{stats.sentOperations}</ThemedText>
-              <ThemedText style={styles.statLabel}>Sent</ThemedText>
-            </View>
-            <View style={styles.statItem}>
-              <ThemedText style={[styles.statValue, styles.receivedText]}>{stats.receivedOperations}</ThemedText>
-              <ThemedText style={styles.statLabel}>Received</ThemedText>
-            </View>
-            <View style={styles.statItem}>
-              <ThemedText style={[styles.statValue, styles.successText]}>{stats.successOperations}</ThemedText>
-              <ThemedText style={styles.statLabel}>Success</ThemedText>
-            </View>
-            <View style={styles.statItem}>
-              <ThemedText style={[styles.statValue, styles.errorText]}>{stats.errorOperations}</ThemedText>
-              <ThemedText style={styles.statLabel}>Errors</ThemedText>
+          <View style={{
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 10,
+          }}>
+            <ThemedText style={styles.statsCardTitle}>Database Operations</ThemedText>
+            <View style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+            }}>
+              <ThemedText style={{
+                fontSize: 12,
+                color: '#666666',
+                marginRight: 8,
+              }}>
+                Last op: {dbOperations.length > 0 ? formatTimestamp(dbOperations[0].timestamp) : 'Never'}
+              </ThemedText>
+              {activeSyncing && (
+                <View style={{
+                  backgroundColor: '#FF9800',
+                  paddingHorizontal: 6,
+                  paddingVertical: 2,
+                  borderRadius: 4,
+                }}>
+                  <ThemedText style={{color: '#FFFFFF', fontSize: 10, fontWeight: 'bold'}}>SYNCING</ThemedText>
+                </View>
+              )}
             </View>
           </View>
           
-          {/* Table statistics */}
-          <View style={styles.detailedStats}>
-            <ThemedText style={styles.detailedStatsTitle}>By Table:</ThemedText>
-            <View style={styles.detailedStatsContent}>
-              {Object.entries(stats.tableStats).map(([table, count]) => (
+          <View style={styles.statsRow}>
+            <View style={[styles.statItem, {backgroundColor: 'rgba(10, 126, 164, 0.1)', borderRadius: 8, padding: 8}]}>
+              <ThemedText style={[styles.statValue, {fontSize: 20}]}>{stats.totalOperations}</ThemedText>
+              <ThemedText style={styles.statLabel}>Total</ThemedText>
+            </View>
+            <View style={[styles.statItem, {backgroundColor: 'rgba(76, 175, 80, 0.1)', borderRadius: 8, padding: 8}]}>
+              <ThemedText style={[styles.statValue, styles.sentText, {fontSize: 18}]}>{stats.sentOperations}</ThemedText>
+              <ThemedText style={styles.statLabel}>Sent</ThemedText>
+            </View>
+            <View style={[styles.statItem, {backgroundColor: 'rgba(33, 150, 243, 0.1)', borderRadius: 8, padding: 8}]}>
+              <ThemedText style={[styles.statValue, styles.receivedText, {fontSize: 18}]}>{stats.receivedOperations}</ThemedText>
+              <ThemedText style={styles.statLabel}>Received</ThemedText>
+            </View>
+            <View style={[styles.statItem, {backgroundColor: 'rgba(0, 200, 83, 0.1)', borderRadius: 8, padding: 8}]}>
+              <ThemedText style={[styles.statValue, styles.successText, {fontSize: 18}]}>{stats.successOperations}</ThemedText>
+              <ThemedText style={styles.statLabel}>Success</ThemedText>
+            </View>
+            <View style={[styles.statItem, {backgroundColor: 'rgba(244, 67, 54, 0.1)', borderRadius: 8, padding: 8}]}>
+              <ThemedText style={[styles.statValue, styles.errorText, {fontSize: 18}]}>{stats.errorOperations}</ThemedText>
+              <ThemedText style={styles.statLabel}>Errors</ThemedText>
+            </View>
+          </View>
+        </ThemedView>
+        
+        {/* Operation Type & Table Distribution */}
+        <View style={{
+          flexDirection: 'row',
+          marginBottom: 10,
+        }}>
+          {/* By Table statistics */}
+          <ThemedView style={{
+            flex: 1,
+            marginRight: 4,
+            padding: 12,
+            backgroundColor: '#FFFFFF',
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: '#e0e0e0',
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: 0.1,
+            shadowRadius: 2,
+            elevation: 1,
+          }}>
+            <ThemedText style={{
+              fontSize: 14,
+              fontWeight: '600',
+              color: '#333333',
+              marginBottom: 8,
+            }}>By Table</ThemedText>
+            <View style={{
+              marginTop: 5,
+            }}>
+              {Object.entries(stats.tableStats).map(([table, count]) => {
+                const percentage = Math.round((count / stats.totalOperations) * 100);
+                return (
                 <TouchableOpacity 
                   key={table} 
                   style={[
-                    styles.detailedStatItem,
-                    tableFilter === table && styles.selectedTableFilter
+                      {
+                        flexDirection: 'column',
+                        marginBottom: 8,
+                      },
+                      tableFilter === table && {
+                        backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                        borderRadius: 4,
+                        padding: 4,
+                      },
+                  ]}
+                  onPress={() => setTableFilter(tableFilter === table ? '' : table)}
+                >
+                    <View style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                    }}>
+                      <View style={[{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 4,
+                        marginRight: 5,
+                        backgroundColor: tableColors[table] || '#999'
+                      }]} />
+                  <ThemedText style={[
+                        {
+                          fontSize: 12,
+                          color: '#333333',
+                        },
+                        tableFilter === table && {
+                          color: '#0A7EA4',
+                          fontWeight: 'bold',
+                        },
+                      ]} numberOfLines={1} ellipsizeMode="middle">
+                        {table}
+                  </ThemedText>
+                    </View>
+                    <View style={styles.tableStatDataContainer}>
+                      <View style={styles.tableStatBarContainer}>
+                        <View style={[styles.tableStatBar, {
+                          width: `${percentage}%`,
+                          backgroundColor: tableColors[table] || '#999'
+                        }]} />
+                      </View>
+                  <ThemedText style={[
+                        styles.tableStatValue,
+                    tableFilter === table && styles.selectedTableFilterText
+                  ]}>
+                        {count} ({percentage}%)
+                  </ThemedText>
+                    </View>
+                </TouchableOpacity>
+                );
+              })}
+            </View>
+          </ThemedView>
+
+          {/* By Operation statistics */}
+          <ThemedView style={[styles.statsDistributionCard, {flex: 1, marginLeft: 4}]}>
+            <View style={{width: '100%'}}>
+              {Object.entries(stats.operationStats).map(([operation, count]) => {
+                const percentage = Math.round((count / stats.totalOperations) * 100);
+                return (
+                  <View key={operation} style={styles.operationStatItem}>
+                    <View style={styles.operationStatLabelContainer}>
+                      <View style={[styles.operationStatDot, {
+                        backgroundColor: getOperationColor(operation)
+                      }]} />
+                      <ThemedText style={styles.operationStatLabel}>
+                        {operation}
+                      </ThemedText>
+                </View>
+                    <View style={styles.operationStatDataContainer}>
+                      <View style={styles.operationStatBarContainer}>
+                        <View style={[styles.operationStatBar, {
+                          width: `${percentage}%`,
+                          backgroundColor: getOperationColor(operation)
+                        }]} />
+            </View>
+                      <ThemedText style={styles.operationStatValue}>
+                        {count} ({percentage}%)
+                      </ThemedText>
+                    </View>
+                  </View>
+                );
+              })}
+          </View>
+        </ThemedView>
+        </View>
+        
+        {/* Filter controls */}
+        <View style={styles.filterControlsContainer}>
+          <View style={styles.filterLabelContainer}>
+            <ThemedText style={styles.filterLabel}>
+              Filter by table:
+          </ThemedText>
+          {tableFilter && (
+            <TouchableOpacity 
+              style={styles.clearFilterButton}
+              onPress={() => setTableFilter('')}
+            >
+                <ThemedText style={styles.clearFilterText}>Clear</ThemedText>
+            </TouchableOpacity>
+          )}
+        </View>
+        
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterButtonsScrollView}>
+            <View style={styles.filterButtonsContainer}>
+              {Object.keys(stats.tableStats).map(table => (
+          <TouchableOpacity 
+                  key={table} 
+            style={[
+                    styles.filterButton,
+                    tableFilter === table && {backgroundColor: tableColors[table] || '#666'},
                   ]}
                   onPress={() => setTableFilter(tableFilter === table ? '' : table)}
                 >
                   <ThemedText style={[
-                    styles.detailedStatLabel,
-                    tableFilter === table && styles.selectedTableFilterText
+                    styles.filterButtonText,
+                    tableFilter === table && {color: '#FFFFFF'}
                   ]}>
-                    {table}:
+                    {table.replace('user_', '')}
                   </ThemedText>
-                  <ThemedText style={[
-                    styles.detailedStatValue,
-                    tableFilter === table && styles.selectedTableFilterText
-                  ]}>
-                    {count}
-                  </ThemedText>
-                </TouchableOpacity>
+          </TouchableOpacity>
               ))}
             </View>
-          </View>
-          
-          {/* Operation statistics */}
-          <View style={styles.detailedStats}>
-            <ThemedText style={styles.detailedStatsTitle}>By Operation:</ThemedText>
-            <View style={styles.detailedStatsContent}>
-              {Object.entries(stats.operationStats).map(([operation, count]) => (
-                <View key={operation} style={styles.detailedStatItem}>
-                  <ThemedText style={styles.detailedStatLabel}>{operation}:</ThemedText>
-                  <ThemedText style={styles.detailedStatValue}>{count}</ThemedText>
-                </View>
-              ))}
-            </View>
-          </View>
-        </ThemedView>
-      
+          </ScrollView>
+        </View>
+        
         {/* Record count info */}
         <View style={styles.recordsInfo}>
           <ThemedText style={styles.recordsInfoText}>
@@ -1064,100 +1403,66 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
             {tableFilter && ` (filtered by "${tableFilter}")`}
           </ThemedText>
           
-          {tableFilter && (
-            <TouchableOpacity 
-              style={styles.clearFilterButton}
-              onPress={() => setTableFilter('')}
+          {/* Show/hide controls */}
+          <View style={styles.recordControlButtons}>
+            {showAllRecords ? (
+          <TouchableOpacity 
+                style={[styles.recordControlButton, {backgroundColor: '#555'}]}
+                onPress={() => {
+                  setShowAllRecords(false);
+                  setVisibleDbRecords(100);
+                }}
+              >
+                <ThemedText style={{color: 'white', fontSize: 12}}>Show Latest 100</ThemedText>
+          </TouchableOpacity>
+            ) : (
+              <TouchableOpacity 
+                style={[styles.recordControlButton, {backgroundColor: '#0A7EA4'}]}
+                onPress={() => setShowAllRecords(true)}
+              >
+                <ThemedText style={{color: 'white', fontSize: 12}}>Show All ({filteredOperations.length})</ThemedText>
+              </TouchableOpacity>
+            )}
+            
+            {/* Add the Copy button */}
+          <TouchableOpacity 
+              style={[styles.recordControlButton, {backgroundColor: '#4CAF50', marginLeft: 8}]}
+              onPress={prepareDbOperationsText}
             >
-              <ThemedText style={styles.clearFilterText}>Clear Filter</ThemedText>
-            </TouchableOpacity>
-          )}
+              <ThemedText style={{color: 'white', fontSize: 12}}>Copy Log</ThemedText>
+          </TouchableOpacity>
+          </View>
         </View>
         
-        {/* Common table filter shortcuts */}
-        <View style={styles.filterShortcutsContainer}>
-          <TouchableOpacity 
-            style={[
-              styles.filterShortcutButton,
-              tableFilter === 'user_feed_changes' && styles.activeFilterShortcut
-            ]}
-            onPress={() => setTableFilter(tableFilter === 'user_feed_changes' ? '' : 'user_feed_changes')}
-          >
-            <ThemedText style={styles.filterShortcutText}>Feed Changes</ThemedText>
-          </TouchableOpacity>
-          
-          <TouchableOpacity 
-            style={[
-              styles.filterShortcutButton,
-              tableFilter === 'user_interactions' && styles.activeFilterShortcut
-            ]}
-            onPress={() => setTableFilter(tableFilter === 'user_interactions' ? '' : 'user_interactions')}
-          >
-            <ThemedText style={styles.filterShortcutText}>Interactions</ThemedText>
-          </TouchableOpacity>
-          
-          <TouchableOpacity 
-            style={[
-              styles.filterShortcutButton,
-              tableFilter === 'user_weight_changes' && styles.activeFilterShortcut
-            ]}
-            onPress={() => setTableFilter(tableFilter === 'user_weight_changes' ? '' : 'user_weight_changes')}
-          >
-            <ThemedText style={styles.filterShortcutText}>Weight Changes</ThemedText>
-          </TouchableOpacity>
-        </View>
-        
-        {/* Operations table */}
-        <ThemedView style={styles.tableContainer}>
-          <View style={styles.tableHeader}>
-            <ThemedText style={[styles.headerCell, styles.timeCell]}>Time</ThemedText>
-            <ThemedText style={[styles.headerCell, styles.directionCell]}>Direction</ThemedText>
-            <ThemedText style={[styles.headerCell, styles.tableCell]}>Table</ThemedText>
-            <ThemedText style={[styles.headerCell, styles.operationCell]}>Operation</ThemedText>
-            <ThemedText style={[styles.headerCell, styles.recordsCell]}>Records</ThemedText>
-            <ThemedText style={[styles.headerCell, styles.statusCell]}>Status</ThemedText>
-            <ThemedText style={[styles.headerCell, styles.dataCell]}>Data</ThemedText>
+        {/* Operations table - enhanced with better visuals */}
+        <ThemedView style={styles.enhancedTableContainer}>
+          <View style={styles.enhancedTableHeader}>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedTimeCell]}>Time</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedDirectionCell]}>Type</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedTableCell]}>Table</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedActionCell]}>Action</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedOperationCell]}>Operation</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedRecordsCell]}>#</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedStatusCell]}>Status</ThemedText>
+            <ThemedText style={[styles.enhancedHeaderCell, styles.enhancedDataCell]}>Data</ThemedText>
           </View>
           
-          <ScrollView style={styles.tableScrollView} nestedScrollEnabled={true}>
-            {recordsToDisplay.map((operation, index) => (
+          <ScrollView style={styles.enhancedTableScrollView} nestedScrollEnabled={true}>
+            {recordsToDisplay.map((operation, index) => {
+              const isError = operation.status === 'error';
+              const isSent = operation.direction === 'sent';
+              const timestamp = formatTimestamp(operation.timestamp);
+              const formattedTime = timestamp.split(' ')[0]; // Just get the time part
+              const actionType = getActionType(operation);
+              
+              return (
               <React.Fragment key={`${operation.timestamp}-${index}`}>
                 <TouchableOpacity 
-                  style={styles.tableRow}
-                  onPress={() => console.log('DB Operation Details:', operation)}
-                >
-                  <ThemedText style={[styles.cell, styles.timeCell]}>
-                    {formatTimestamp(operation.timestamp)}
-                  </ThemedText>
-                  <ThemedText 
                     style={[
-                      styles.cell, 
-                      styles.directionCell, 
-                      operation.direction === 'sent' ? styles.sentText : styles.receivedText
+                      styles.enhancedTableRow,
+                      index % 2 === 0 && styles.enhancedTableRowAlt,
+                      isError && styles.enhancedTableRowError
                     ]}
-                  >
-                    {operation.direction === 'sent' ? '↑' : '↓'} {operation.direction}
-                  </ThemedText>
-                  <ThemedText style={[styles.cell, styles.tableCell]}>
-                    {operation.table}
-                  </ThemedText>
-                  <ThemedText style={[styles.cell, styles.operationCell]}>
-                    {operation.operation}
-                  </ThemedText>
-                  <ThemedText style={[styles.cell, styles.recordsCell]}>
-                    {operation.records}
-                  </ThemedText>
-                  <ThemedText 
-                    style={[
-                      styles.cell, 
-                      styles.statusCell, 
-                      operation.status === 'success' ? styles.successText : styles.errorText
-                    ]}
-                  >
-                    {operation.status}
-                  </ThemedText>
-                  <TouchableOpacity 
-                    style={styles.dataCell}
                     onPress={() => {
                       setExpandedData(prev => 
                         prev === `${operation.timestamp}-${index}` 
@@ -1166,60 +1471,149 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                       );
                     }}
                   >
-                    <ThemedText style={styles.cell}>
+                    {/* Time with tooltip showing full timestamp */}
+                    <View style={[styles.enhancedCell, styles.enhancedTimeCell]}>
+                      <ThemedText style={styles.enhancedTimeText}>{formattedTime}</ThemedText>
+                      <ThemedText style={styles.enhancedTimeSubtext}>{timestamp.split(' ')[1]}</ThemedText>
+                    </View>
+                    
+                    {/* Direction with icon */}
+                    <View style={[
+                      styles.enhancedCell, 
+                      styles.enhancedDirectionCell,
+                      isSent ? styles.enhancedSentCell : styles.enhancedReceivedCell
+                    ]}>
+                      <View style={[
+                        styles.enhancedDirectionIcon,
+                        isSent ? styles.enhancedSentIcon : styles.enhancedReceivedIcon
+                      ]}>
+                        <ThemedText style={styles.enhancedDirectionIconText}>
+                          {isSent ? '↑' : '↓'}
+                  </ThemedText>
+                      </View>
+                      <ThemedText style={styles.enhancedDirectionText}>
+                        {isSent ? 'Sent' : 'Rcvd'}
+                  </ThemedText>
+                    </View>
+                    
+                    {/* Table name with color coding */}
+                    <View style={[styles.enhancedCell, styles.enhancedTableCell]}>
+                      <View style={[
+                        styles.enhancedTableIndicator,
+                        {backgroundColor: tableColors[operation.table] || '#999'}
+                      ]}/>
+                      <ThemedText 
+                        style={styles.enhancedTableText}
+                        numberOfLines={1}
+                        ellipsizeMode="middle"
+                      >
+                        {operation.table.replace('user_', '')}
+                  </ThemedText>
+                    </View>
+                    
+                    {/* NEW: Action type column */}
+                    <View style={[styles.enhancedCell, styles.enhancedActionCell]}>
+                      <ThemedText 
+                        style={styles.enhancedActionText}
+                        numberOfLines={1}
+                      >
+                        {actionType}
+                  </ThemedText>
+                    </View>
+                    
+                    {/* Operation with color coding */}
+                    <View style={[styles.enhancedCell, styles.enhancedOperationCell]}>
+                  <ThemedText 
+                    style={[
+                          styles.enhancedOperationText,
+                          {color: getOperationColor(operation.operation)}
+                    ]}
+                  >
+                        {operation.operation}
+                  </ThemedText>
+                    </View>
+                    
+                    {/* Records count */}
+                    <ThemedText style={[styles.enhancedCell, styles.enhancedRecordsCell]}>
+                      {operation.records}
+                    </ThemedText>
+                    
+                    {/* Status with color coding */}
+                    <View style={[
+                      styles.enhancedCell, 
+                      styles.enhancedStatusCell,
+                    ]}>
+                      <View style={[
+                        styles.enhancedStatusIndicator,
+                        operation.status === 'success' 
+                          ? styles.enhancedSuccessIndicator 
+                          : styles.enhancedErrorIndicator
+                      ]}>
+                        <ThemedText style={styles.enhancedStatusText}>
+                          {operation.status === 'success' ? 'OK' : 'ERR'}
+                        </ThemedText>
+                      </View>
+                    </View>
+                    
+                    {/* Data preview */}
+                  <TouchableOpacity 
+                      style={[styles.enhancedCell, styles.enhancedDataCell]}
+                    onPress={() => {
+                      setExpandedData(prev => 
+                        prev === `${operation.timestamp}-${index}` 
+                          ? null 
+                          : `${operation.timestamp}-${index}`
+                      );
+                    }}
+                  >
+                      <ThemedText style={styles.enhancedDataText}>
                       {expandedData === `${operation.timestamp}-${index}` ? 'Hide' : 'View'}
                     </ThemedText>
                   </TouchableOpacity>
                 </TouchableOpacity>
+                  
+                  {/* Expanded data view */}
                 {expandedData === `${operation.timestamp}-${index}` && (
-                  <View style={styles.expandedDataContainer}>
-                    <ScrollView style={styles.dataScrollView} horizontal={true}>
-                      <ThemedText style={styles.dataText}>
+                    <View style={styles.enhancedExpandedDataContainer}>
+                      <View style={styles.enhancedExpandedDataHeader}>
+                        <ThemedText style={styles.enhancedExpandedDataTitle}>
+                          {operation.operation.toUpperCase()} to {operation.table}
+                        </ThemedText>
+                        {operation.error && (
+                          <ThemedText style={styles.enhancedExpandedDataError}>
+                            Error: {operation.error}
+                          </ThemedText>
+                        )}
+                      </View>
+                      <ScrollView style={styles.enhancedDataScrollView} horizontal={true}>
+                        <ThemedText style={styles.enhancedDataJsonText}>
                         {JSON.stringify(operation.data, null, 2)}
                       </ThemedText>
                     </ScrollView>
                   </View>
                 )}
               </React.Fragment>
-            ))}
+              );
+            })}
             
             {filteredOperations.length === 0 && (
-              <View style={styles.emptyState}>
-                <ThemedText style={styles.emptyText}>
+              <View style={styles.enhancedEmptyState}>
+                <ThemedText style={styles.enhancedEmptyText}>
                   {tableFilter ? `No records found for table "${tableFilter}"` : 'No database operations logged yet'}
                 </ThemedText>
               </View>
             )}
           </ScrollView>
           
-          {/* Load more / Show all buttons */}
-          {filteredOperations.length > visibleDbRecords && !showAllRecords && (
-            <View style={styles.loadMoreContainer}>
+          {/* Load more button */}
+          {!showAllRecords && filteredOperations.length > visibleDbRecords && (
               <TouchableOpacity 
-                style={[styles.loadMoreButton, {backgroundColor: '#0A7EA4'}]}
+              style={styles.enhancedLoadMoreButton}
                 onPress={() => setVisibleDbRecords(prev => prev + 100)}
               >
-                <ThemedText style={{color: 'white', fontSize: 12, fontWeight: '500'}}>Load 100 More</ThemedText>
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.showAllButton, {backgroundColor: '#555'}]}
-                onPress={() => setShowAllRecords(true)}
-              >
-                <ThemedText style={{color: 'white', fontSize: 12, fontWeight: '500'}}>Show All ({filteredOperations.length})</ThemedText>
-              </TouchableOpacity>
-            </View>
-          )}
-          
-          {/* Show fewer button when showing all records */}
-          {showAllRecords && filteredOperations.length > 100 && (
-            <TouchableOpacity 
-              style={[styles.showFewerButton, {backgroundColor: '#555'}]}
-              onPress={() => {
-                setShowAllRecords(false);
-                setVisibleDbRecords(100);
-              }}
-            >
-              <ThemedText style={{color: 'white', fontSize: 12, fontWeight: '500'}}>Show Fewer (100)</ThemedText>
+              <ThemedText style={styles.enhancedLoadMoreText}>
+                Load 100 More
+              </ThemedText>
             </TouchableOpacity>
           )}
         </ThemedView>
@@ -1269,6 +1663,13 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
   
   // Render the weights tab
   const renderWeightsTab = () => {
+    // Get all topic weights for debugging
+    const allTopicWeights = Object.entries(userProfile.topics).map(([topic, data]) => ({
+      topic,
+      weight: data.weight,
+      isDefault: Math.abs(data.weight - 0.5) < 0.001 // Check if it's the default weight (with small epsilon for floating point comparison)
+    }));
+    
     return (
       <ScrollView style={styles.tabScrollView}>
         <ThemedView style={styles.statsCard}>
@@ -1278,306 +1679,123 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
           </ThemedText>
         </ThemedView>
 
-        {/* Add Current Weights section */}
+        {/* Debug section to show raw weight values */}
         <ThemedView style={styles.currentWeightsContainer}>
-          <View style={styles.currentWeightsHeader}>
-            <ThemedText style={styles.sectionTitle}>Current Weights from Database</ThemedText>
-            <View style={{flexDirection: 'row'}}>
-              <TouchableOpacity 
-                style={[styles.refreshButton, {marginRight: 8, backgroundColor: 'rgba(10, 126, 164, 0.3)'}]}
-                onPress={async () => {
-                  if (!isLoadingWeights && user?.id) {
-                    await loadWeightsFromDB();
-                  }
-                }}
-                disabled={isLoadingWeights || !user?.id}
-              >
-                {isLoadingWeights ? (
-                  <ThemedText style={[styles.refreshingText, {color: '#555'}]}>Loading...</ThemedText>
-                ) : (
-                  <>
-                    <Feather name="refresh-cw" size={16} color="#0A7EA4" />
-                    <ThemedText style={[styles.refreshText, {color: '#0A7EA4'}]}>Refresh</ThemedText>
-                  </>
-                )}
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={[styles.refreshButton, {backgroundColor: 'rgba(91, 106, 232, 0.3)'}]}
-                onPress={debugDatabase}
-                disabled={!user?.id}
-              >
-                <Feather name="database" size={16} color="#5b6ae8" />
-                <ThemedText style={[styles.refreshText, {color: '#5b6ae8'}]}>Debug DB</ThemedText>
-              </TouchableOpacity>
-            </View>
-          </View>
+          <ThemedText style={styles.sectionTitle}>Debug Raw Weights</ThemedText>
           
-          {dbDebugResults && (
-            <ThemedView style={styles.debugResultsContainer}>
-              <View style={styles.debugResultsHeader}>
-                <ThemedText style={styles.debugResultsTitle}>Database Debug Results</ThemedText>
-                <TouchableOpacity
-                  style={[styles.refreshButton, {backgroundColor: 'rgba(232, 91, 91, 0.2)'}]}
-                  onPress={() => setDbDebugResults(null)}
-                >
-                  <Feather name="x" size={16} color="#e85b5b" />
-                  <ThemedText style={[styles.refreshText, {color: '#e85b5b'}]}>Close</ThemedText>
-                </TouchableOpacity>
-              </View>
-              
-              <View style={styles.tableExistsContainer}>
-                <ThemedText style={styles.debugSectionTitle}>Tables Exist:</ThemedText>
-                {Object.entries(dbDebugResults.tablesExist || {}).map(([tableName, exists]) => (
-                  <View key={tableName} style={styles.tableExistsRow}>
-                    <ThemedText style={styles.tableNameText}>{tableName}:</ThemedText>
+          {/* Add this debug weights summary component */}
+          <ThemedView style={styles.debugWeightsSummary}>
+            <ThemedText style={styles.debugWeightsHeader}>Topic Weights Summary</ThemedText>
+            
+            <ThemedText style={styles.debugWeightsInfo}>
+              Default Weight: <ThemedText style={{fontWeight: 'bold', color: '#FFD700'}}>0.50</ThemedText>
+            </ThemedText>
+            
+            <ThemedText style={styles.debugWeightsInfo}>
+              Total Topics: {Object.keys(userProfile.topics || {}).length}
+            </ThemedText>
+            
+            <ThemedText style={styles.debugWeightsInfo}>
+              Weights Distribution: {
+                Object.entries(userProfile.topics || {}).reduce((counts, [_, data]) => {
+                  if (Math.abs(data.weight - 0.5) < 0.001) counts.default++;
+                  else if (data.weight > 0.5) counts.increased++;
+                  else counts.decreased++;
+                  return counts;
+                }, {default: 0, increased: 0, decreased: 0}).default
+              } default / {
+                Object.entries(userProfile.topics || {}).reduce((counts, [_, data]) => {
+                  if (Math.abs(data.weight - 0.5) < 0.001) counts.default++;
+                  else if (data.weight > 0.5) counts.increased++;
+                  else counts.decreased++;
+                  return counts;
+                }, {default: 0, increased: 0, decreased: 0}).increased
+              } increased / {
+                Object.entries(userProfile.topics || {}).reduce((counts, [_, data]) => {
+                  if (Math.abs(data.weight - 0.5) < 0.001) counts.default++;
+                  else if (data.weight > 0.5) counts.increased++;
+                  else counts.decreased++;
+                  return counts;
+                }, {default: 0, increased: 0, decreased: 0}).decreased
+              } decreased
+            </ThemedText>
+          </ThemedView>
+          
+          {allTopicWeights.map(({ topic, weight, isDefault }) => (
+            <View key={`debug-${topic}`} style={styles.weightItem}>
+              <ThemedText style={styles.weightLabel}>{topic}</ThemedText>
                     <ThemedText style={[
-                      styles.tableExistsText, 
-                      (exists ? styles.tableExistsTrue : styles.tableExistsFalse)
-                    ]}>
-                      {exists ? 'YES' : 'NO'}
+                styles.weightValue, 
+                isDefault ? { color: '#FFD700' } : // Gold for default
+                weight > 0.5 ? { color: '#4CAF50' } : // Green for increased
+                { color: '#FF5252' } // Red for decreased
+              ]}>
+                {weight.toFixed(2)} 
+                <ThemedText style={{fontSize: 12, opacity: 0.8}}>
+                  {isDefault ? " [DEFAULT]" : 
+                   weight > 0.5 ? " [INCREASED]" : 
+                   " [DECREASED]"}
+                </ThemedText>
                     </ThemedText>
                   </View>
                 ))}
+          <ThemedText style={[styles.lastUpdatedText, {textAlign: 'center', marginTop: 10}]}>
+            <ThemedText style={{color: '#FFD700'}}>● Gold = Default (0.50)</ThemedText> | 
+            <ThemedText style={{color: '#4CAF50'}}> ● Green = Increased</ThemedText> | 
+            <ThemedText style={{color: '#FF5252'}}> ● Red = Decreased</ThemedText>
+          </ThemedText>
+        </ThemedView>
+
+        {/* Current Weights section - Client-side only */}
+        <ThemedView style={styles.currentWeightsContainer}>
+          <View style={styles.currentWeightsHeader}>
+            <ThemedText style={styles.sectionTitle}>Current Client-Side Weights</ThemedText>
               </View>
               
-              {dbDebugResults.error && (
-                <View style={styles.debugDetailRow}>
-                  <ThemedText style={styles.debugErrorText}>
-                    Error: {dbDebugResults.error}
+          <View style={styles.lastUpdatedContainer}>
+            <ThemedText style={styles.lastUpdatedText}>
+              Last Updated: {new Date(userProfile.lastRefreshed).toLocaleTimeString()}
                   </ThemedText>
                 </View>
-              )}
-              
-              {/* Show column information for each table that exists */}
-              {dbDebugResults.tableColumns && Object.keys(dbDebugResults.tableColumns).length > 0 && (
-                <View>
-                  <ThemedText style={styles.debugSectionTitle}>Table Structure:</ThemedText>
-                  {Object.entries(dbDebugResults.tableColumns).map(([tableName, columns]) => (
-                    <View key={`columns-${tableName}`} style={styles.columnInfoContainer}>
-                      <ThemedText style={styles.columnInfoTitle}>{tableName}</ThemedText>
-                      {Array.isArray(columns) && columns.map((column: any, index: number) => (
-                        <View key={`column-${tableName}-${index}`} style={styles.columnRow}>
-                          <ThemedText style={styles.columnName}>{column.column_name}</ThemedText>
-                          <ThemedText style={styles.columnType}>
-                            {column.data_type}{column.is_nullable === 'YES' ? ' (nullable)' : ''}
+                  
+          {/* Rest of the existing weights display */}
+          {Object.entries(userProfile.topics || {}).length > 0 ? (
+            <ScrollView style={{maxHeight: 100}} nestedScrollEnabled={true}>
+              {Object.entries(userProfile.topics).map(([topicName, topic]) => (
+                <ThemedText key={topicName} style={{fontSize: 12, color: '#333333', marginBottom: 4}}>
+                  {topicName}: {topic.weight.toFixed(4)}, 
+                  Subtopics: {Object.entries(topic.subtopics).map(([subName, sub]) => 
+                    `${subName}=${sub.weight.toFixed(4)}`).join(', ')}
                           </ThemedText>
-                        </View>
-                      ))}
-                    </View>
-                  ))}
-                </View>
-              )}
-              
-              {!Object.values(dbDebugResults.tablesExist || {}).some(Boolean) && (
-                <TouchableOpacity
-                  style={[
-                    styles.refreshButton, 
-                    {backgroundColor: 'rgba(76, 175, 80, 0.2)', alignSelf: 'center', marginTop: 12}
-                  ]}
-                  onPress={fixDatabase}
-                  disabled={isFixingDb}
-                >
-                  {isFixingDb ? (
-                    <ThemedText style={[styles.refreshingText, {color: '#4CAF50'}]}>Fixing...</ThemedText>
-                  ) : (
-                    <>
-                      <Feather name="tool" size={16} color="#4CAF50" />
-                      <ThemedText style={[styles.refreshText, {color: '#4CAF50'}]}>Fix Missing Tables</ThemedText>
-                    </>
-                  )}
-                </TouchableOpacity>
-              )}
-              
-              {isFixingDb && (
-                <ThemedText style={styles.refreshProgressText}>
-                  Creating missing tables and initializing data...
+              ))}
+            </ScrollView>
+          ) : (
+            <ThemedText style={{fontSize: 12, color: '#666666'}}>
+              No topics found
                 </ThemedText>
               )}
-              
-              {/* Add additional debug information button */}
-              <TouchableOpacity
-                style={[
-                  styles.refreshButton, 
-                  {backgroundColor: 'rgba(91, 106, 232, 0.2)', alignSelf: 'center', marginTop: 12}
-                ]}
-                onPress={debugDatabase}
-                disabled={isFixingDb}
-              >
-                <Feather name="refresh-cw" size={16} color="#5b6ae8" />
-                <ThemedText style={[styles.refreshText, {color: '#5b6ae8'}]}>Refresh Debug Info</ThemedText>
-              </TouchableOpacity>
-              
-              {/* Add specific fix button for topics data */}
-              {(dbDebugResults.tablesExist?.user_profile_data && 
-                (!Object.keys(userProfile.topics || {}).length || userProfile.topics === null)) && (
-                <TouchableOpacity
-                  style={[
-                    styles.refreshButton, 
-                    {backgroundColor: 'rgba(243, 156, 18, 0.2)', alignSelf: 'center', marginTop: 12}
-                  ]}
-                  onPress={() => fixDatabase()}
-                  disabled={isFixingDb}
-                >
-                  {isFixingDb ? (
-                    <ThemedText style={[styles.refreshingText, {color: '#f39c12'}]}>Initializing...</ThemedText>
-                  ) : (
-                    <>
-                      <Feather name="database" size={16} color="#f39c12" />
-                      <ThemedText style={[styles.refreshText, {color: '#f39c12'}]}>Initialize Topics Data</ThemedText>
-                    </>
-                  )}
-                </TouchableOpacity>
-              )}
             </ThemedView>
-          )}
+        
+        {/* Rest of the existing weights display */}
+        <ThemedView style={styles.weightChangesContainer}>
+          <ThemedText style={styles.sectionTitle}>Recent Weight Changes</ThemedText>
           
-          {Object.keys(userProfile.topics || {}).length === 0 ? (
-            <View style={styles.emptyState}>
-              <ThemedText style={styles.emptyText}>No topic weights in user profile yet</ThemedText>
-            </View>
-          ) : (
-            // Sort topics by weight descending
-            Object.entries(userProfile.topics)
-              .sort(([, topicA], [, topicB]) => topicB.weight - topicA.weight)
-              .map(([topicName, topic]) => {
-                // Calculate trend by looking at recent weight changes
-                const topicTrend = getWeightTrend(topicName, 'topic');
-                const topicPercentage = Math.round(topic.weight * 100);
-                
-                return (
-                <View key={topicName} style={styles.topicWeightItem}>
-                  <View style={styles.weightHeaderRow}>
-                    <ThemedText style={styles.topicName}>{topicName}</ThemedText>
-                    <View style={styles.weightValueContainer}>
-                      <ThemedText style={styles.weightValue}>{topic.weight.toFixed(2)}</ThemedText>
-                      {topicTrend !== 0 && (
-                        <View style={styles.trendContainer}>
-                          <Feather 
-                            name={topicTrend > 0 ? "trending-up" : "trending-down"} 
-                            size={16} 
-                            color={topicTrend > 0 ? '#4CAF50' : '#F44336'} 
-                          />
-                        </View>
-                      )}
-                    </View>
-                  </View>
-                  
-                  <View style={styles.weightInfoRow}>
-                    <View style={styles.percentageContainer}>
-                      <ThemedText style={styles.percentageText}>{topicPercentage}%</ThemedText>
-                    </View>
-                    <ThemedText style={styles.trendsText}>
-                      {topicTrend > 0 ? `+${topicTrend.toFixed(2)} recently` : 
-                       topicTrend < 0 ? `${topicTrend.toFixed(2)} recently` : 
-                       'No recent changes'}
+          {/* Debug info for weight changes */}
+          <ThemedView style={{backgroundColor: 'rgba(255, 215, 0, 0.1)', padding: 10, borderRadius: 5, marginBottom: 10}}>
+            <ThemedText style={{fontSize: 12, color: '#333333', fontWeight: 'bold'}}>
+              Debug Info
                     </ThemedText>
-                  </View>
-                  
-                  {/* Sort subtopics by weight descending */}
-                  {Object.entries(topic.subtopics)
-                    .sort(([, subtopicA], [, subtopicB]) => subtopicB.weight - subtopicA.weight)
-                    .map(([subtopicName, subtopic]) => {
-                      // Calculate trend for subtopic
-                      const subtopicTrend = getWeightTrend(subtopicName, 'subtopic', topicName);
-                      const subtopicPercentage = Math.round(subtopic.weight * 100);
-                      
-                      return (
-                      <View key={`${topicName}-${subtopicName}`} style={styles.subtopicWeightItem}>
-                        <View style={styles.weightHeaderRow}>
-                          <ThemedText style={styles.subtopicName}>{subtopicName}</ThemedText>
-                          <View style={styles.weightValueContainer}>
-                            <ThemedText style={styles.weightValue}>{subtopic.weight.toFixed(2)}</ThemedText>
-                            {subtopicTrend !== 0 && (
-                              <View style={styles.trendContainer}>
-                                <Feather 
-                                  name={subtopicTrend > 0 ? "trending-up" : "trending-down"} 
-                                  size={14} 
-                                  color={subtopicTrend > 0 ? '#4CAF50' : '#F44336'} 
-                                />
-                              </View>
-                            )}
-                          </View>
-                        </View>
-                        
-                        <View style={styles.weightInfoRow}>
-                          <View style={[styles.percentageContainer, styles.subtopicPercentage]}>
-                            <ThemedText style={styles.percentageText}>{subtopicPercentage}%</ThemedText>
-                          </View>
-                          <ThemedText style={styles.trendsText}>
-                            {subtopicTrend > 0 ? `+${subtopicTrend.toFixed(2)} recently` : 
-                             subtopicTrend < 0 ? `${subtopicTrend.toFixed(2)} recently` : 
-                             'No recent changes'}
+            <ThemedText style={{fontSize: 11, color: '#666666'}}>
+              Default weight value: 0.50
                           </ThemedText>
-                        </View>
-                        
-                        {/* Only show branches if there are more than just the default "General" branch */}
-                        {Object.keys(subtopic.branches).length > 1 && 
-                          // Sort branches by weight descending
-                          Object.entries(subtopic.branches)
-                            .sort(([, branchA], [, branchB]) => branchB.weight - branchA.weight)
-                            .map(([branchName, branch]) => {
-                              // Calculate trend for branch
-                              const branchTrend = getWeightTrend(branchName, 'branch', topicName, subtopicName);
-                              const branchPercentage = Math.round(branch.weight * 100);
-                              
-                              return (
-                              <View key={`${topicName}-${subtopicName}-${branchName}`} style={styles.branchWeightItem}>
-                                <View style={styles.weightHeaderRow}>
-                                  <ThemedText style={styles.branchName}>{branchName}</ThemedText>
-                                  <View style={styles.weightValueContainer}>
-                                    <ThemedText style={styles.weightValue}>{branch.weight.toFixed(2)}</ThemedText>
-                                    {branchTrend !== 0 && (
-                                      <View style={styles.trendContainer}>
-                                        <Feather 
-                                          name={branchTrend > 0 ? "trending-up" : "trending-down"} 
-                                          size={12} 
-                                          color={branchTrend > 0 ? '#4CAF50' : '#F44336'} 
-                                        />
-                                      </View>
-                                    )}
-                                  </View>
-                                </View>
-                                
-                                <View style={styles.weightInfoRow}>
-                                  <View style={[styles.percentageContainer, styles.branchPercentage]}>
-                                    <ThemedText style={styles.percentageText}>{branchPercentage}%</ThemedText>
-                                  </View>
-                                  <ThemedText style={styles.trendsText}>
-                                    {branchTrend > 0 ? `+${branchTrend.toFixed(2)} recently` : 
-                                     branchTrend < 0 ? `${branchTrend.toFixed(2)} recently` : 
-                                     'No recent changes'}
+            <ThemedText style={{fontSize: 11, color: '#666666'}}>
+              Displayed weights might not match actual values due to display formatting
                                   </ThemedText>
-                                </View>
-                              </View>
-                            );
-                          })
-                        }
-                      </View>
-                    );
-                  })}
-                </View>
-              );
-            })
-          )}
-          
-          <ThemedText style={styles.lastUpdatedText}>
-            {lastWeightUpdateTime > 0 ? (
-              <>
-                <Feather name="database" size={12} color="rgba(255, 255, 255, 0.5)" style={{marginRight: 4}} />
-                Last pulled from DB: {new Date(lastWeightUpdateTime).toLocaleString()}
-              </>
-            ) : user?.id ? (
-              "Weights not yet synced with database"
-            ) : (
-              "Sign in to sync weights with database"
-            )}
+            <ThemedText style={{fontSize: 11, color: '#666666'}}>
+              The 'Debug Raw Weights' panel above shows the actual current weights
           </ThemedText>
         </ThemedView>
         
-        <ThemedText style={styles.sectionTitle}>Weight Change History</ThemedText>
-        
-        <ThemedView style={styles.weightChangesContainer}>
           {weightChanges.length === 0 ? (
             <View style={styles.emptyState}>
               <ThemedText style={styles.emptyText}>No weight changes recorded yet</ThemedText>
@@ -1587,7 +1805,7 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
               <View key={index} style={styles.weightChangeItem}>
                 <View style={styles.weightChangeHeader}>
                   <ThemedText style={styles.weightChangeCategory}>
-                    {change.category} {change.subtopic ? `> ${change.subtopic}` : ''}
+                    {change.topic} {change.subtopic ? `> ${change.subtopic}` : ''}
                     {change.branch ? `> ${change.branch}` : ''}
                   </ThemedText>
                   <View style={styles.weightChangeInfo}>
@@ -1595,6 +1813,7 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                       styles.weightChangeType, 
                       change.interactionType === 'correct' ? styles.correctText : 
                       change.interactionType === 'incorrect' ? styles.incorrectText : 
+                      change.interactionType === 'skipped' ? styles.skippedText : 
                       styles.skippedText
                     ]}>
                       {change.interactionType.toUpperCase()}
@@ -1619,11 +1838,17 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                   
                   <View style={styles.weightTableRow}>
                     <ThemedText style={styles.weightTableCell}>Topic</ThemedText>
-                    <ThemedText style={styles.weightTableCell}>
-                      {change.oldWeights.topicWeight.toFixed(2)}
+                    <ThemedText style={[
+                      styles.weightTableCell,
+                      isDefaultWeight(change.oldWeights.topicWeight) ? {fontStyle: 'italic'} : {}
+                    ]}>
+                      {formatWeight(change.oldWeights.topicWeight)}
                     </ThemedText>
-                    <ThemedText style={styles.weightTableCell}>
-                      {change.newWeights.topicWeight.toFixed(2)}
+                    <ThemedText style={[
+                      styles.weightTableCell,
+                      isDefaultWeight(change.newWeights.topicWeight) ? {fontStyle: 'italic'} : {}
+                    ]}>
+                      {formatWeight(change.newWeights.topicWeight)}
                     </ThemedText>
                     <ThemedText 
                       style={[
@@ -1642,11 +1867,17 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                    change.newWeights.subtopicWeight !== undefined && (
                     <View style={styles.weightTableRow}>
                       <ThemedText style={styles.weightTableCell}>Subtopic</ThemedText>
-                      <ThemedText style={styles.weightTableCell}>
-                        {change.oldWeights.subtopicWeight.toFixed(2)}
+                      <ThemedText style={[
+                        styles.weightTableCell,
+                        isDefaultWeight(change.oldWeights.subtopicWeight) ? {fontStyle: 'italic'} : {}
+                      ]}>
+                        {formatWeight(change.oldWeights.subtopicWeight)}
                       </ThemedText>
-                      <ThemedText style={styles.weightTableCell}>
-                        {change.newWeights.subtopicWeight.toFixed(2)}
+                      <ThemedText style={[
+                        styles.weightTableCell,
+                        isDefaultWeight(change.newWeights.subtopicWeight) ? {fontStyle: 'italic'} : {}
+                      ]}>
+                        {formatWeight(change.newWeights.subtopicWeight)}
                       </ThemedText>
                       <ThemedText 
                         style={[
@@ -1666,11 +1897,17 @@ export function InteractionTracker({ feedData = [], debugEnabled = false }: Inte
                    change.newWeights.branchWeight !== undefined && (
                     <View style={styles.weightTableRow}>
                       <ThemedText style={styles.weightTableCell}>Branch</ThemedText>
-                      <ThemedText style={styles.weightTableCell}>
-                        {change.oldWeights.branchWeight.toFixed(2)}
+                      <ThemedText style={[
+                        styles.weightTableCell,
+                        isDefaultWeight(change.oldWeights.branchWeight) ? {fontStyle: 'italic'} : {}
+                      ]}>
+                        {formatWeight(change.oldWeights.branchWeight)}
                       </ThemedText>
-                      <ThemedText style={styles.weightTableCell}>
-                        {change.newWeights.branchWeight.toFixed(2)}
+                      <ThemedText style={[
+                        styles.weightTableCell,
+                        isDefaultWeight(change.newWeights.branchWeight) ? {fontStyle: 'italic'} : {}
+                      ]}>
+                        {formatWeight(change.newWeights.branchWeight)}
                       </ThemedText>
                       <ThemedText 
                         style={[
@@ -2093,7 +2330,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   statLabel: {
-    color: '#666666',
+    color: '#333333',
     fontSize: 12,
   },
   // Table styles for database log
@@ -2168,7 +2405,7 @@ const styles = StyleSheet.create({
     marginVertical: 5,
   },
   emptyText: {
-    color: '#666666',
+    color: '#333333',
     fontStyle: 'italic',
     textAlign: 'center',
   },
@@ -2311,7 +2548,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#333333',
   },
-  feedItemCategory: {
+  feedItemTopic: {
     fontSize: 12,
     color: '#666666',
   },
@@ -2480,14 +2717,13 @@ const styles = StyleSheet.create({
     borderTopColor: 'rgba(0, 0, 0, 0.1)',
   },
   detailedStatsTitle: {
+    fontSize: 14,
+    fontWeight: '600',
     color: '#333333',
-    fontSize: 13,
-    fontWeight: 'bold',
-    marginBottom: 5,
+    marginBottom: 8,
   },
   detailedStatsContent: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+    marginTop: 5,
   },
   detailedStatItem: {
     flexDirection: 'row',
@@ -2524,23 +2760,106 @@ const styles = StyleSheet.create({
   },
   tabScrollView: {
     flex: 1,
+    width: '100%',
   },
   logQuestion: {
-    fontSize: 14,
-    marginBottom: 4,
+    fontSize: 13,
     color: '#333333',
+    marginVertical: 2,
   },
   logTimeSpent: {
-    fontSize: 12,
-    opacity: 0.7,
-    color: '#666666',
+    fontSize: 11,
+    color: '#333333',
+    fontStyle: 'italic',
   },
   feedStatusContainer: {
-    marginBottom: 20,
+    padding: 10,
+    marginBottom: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
   },
   sectionHeader: {
-    marginVertical: 10,
+    fontSize: 16,
+    fontWeight: '600',
     color: '#333333',
+    marginVertical: 10,
+  },
+  tableStatDataContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  tableStatBarContainer: {
+    flex: 1,
+    height: 8,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginRight: 8,
+  },
+  tableStatBar: {
+    height: 8,
+    borderRadius: 4,
+  },
+  tableStatValue: {
+    fontSize: 11,
+    color: '#333333',
+    minWidth: 50,
+    textAlign: 'right',
+  },
+  selectedTableFilterText: {
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  statsDistributionCard: {
+    padding: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    marginBottom: 10,
+  },
+  operationStatItem: {
+    marginBottom: 5,
+  },
+  operationStatLabelContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  operationStatDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 4,
+  },
+  operationStatLabel: {
+    fontSize: 11,
+    color: '#333333',
+  },
+  operationStatDataContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  operationStatBarContainer: {
+    flex: 1,
+    height: 6,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginRight: 8,
+  },
+  operationStatBar: {
+    height: 6,
+    borderRadius: 3,
+  },
+  operationStatValue: {
+    fontSize: 10,
+    color: '#333333',
+    minWidth: 50,
+    textAlign: 'right',
   },
   weightChangesContainer: {
     marginTop: 10,
@@ -2668,12 +2987,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#333333',
   },
+  lastUpdatedContainer: {
+    marginTop: 4,
+  },
   lastUpdatedText: {
     fontSize: 12,
-    color: '#666666',
-    marginTop: 10,
-    textAlign: 'right',
-    fontStyle: 'italic',
+    color: 'rgba(255, 255, 255, 0.6)',
+    marginTop: 4,
+    textAlign: 'center',
   },
   weightHeaderRow: {
     flexDirection: 'row',
@@ -2833,15 +3154,13 @@ const styles = StyleSheet.create({
     maxHeight: 500,
   },
   recordsInfo: {
-    padding: 8,
-    marginBottom: 8,
-    backgroundColor: 'rgba(240, 240, 240, 0.5)',
-    borderRadius: 5,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 8,
   },
   recordsInfoText: {
     fontSize: 12,
-    textAlign: 'center',
     color: '#666666',
   },
   loadMoreContainer: {
@@ -2966,5 +3285,346 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 4,
     elevation: 5,
+  },
+  weightItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  weightLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#333333',
+  },
+  debugWeightsSummary: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  
+  debugWeightsHeader: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333333',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  
+  debugWeightsInfo: {
+    fontSize: 14,
+    color: '#333333',
+    marginBottom: 4,
+  },
+  tableStatDataContainer: {
+    marginTop: 2,
+  },
+  tableStatBarContainer: {
+    height: 4,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    borderRadius: 2,
+    marginTop: 2,
+    marginBottom: 2,
+  },
+  tableStatBar: {
+    height: 4,
+    borderRadius: 2,
+  },
+  tableStatValue: {
+    fontSize: 11,
+    color: '#333333',
+  },
+  statsDistributionCard: {
+    padding: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  operationStatItem: {
+    flexDirection: 'column',
+    marginBottom: 8,
+  },
+  operationStatLabelContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  operationStatDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 5,
+  },
+  operationStatLabel: {
+    fontSize: 12,
+    color: '#333333',
+  },
+  operationStatDataContainer: {
+    marginTop: 2,
+  },
+  operationStatBarContainer: {
+    height: 4,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    borderRadius: 2,
+    marginTop: 2,
+    marginBottom: 2,
+  },
+  operationStatBar: {
+    height: 4,
+    borderRadius: 2,
+  },
+  operationStatValue: {
+    fontSize: 11,
+    color: '#333333',
+  },
+  filterControlsContainer: {
+    marginBottom: 10,
+  },
+  filterLabelContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 5,
+  },
+  filterLabel: {
+    fontSize: 13,
+    color: '#333333',
+  },
+  filterButtonsScrollView: {
+    maxHeight: 40,
+  },
+  filterButtonsContainer: {
+    flexDirection: 'row',
+    paddingVertical: 4,
+  },
+  filterButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    backgroundColor: '#F0F0F0',
+    borderRadius: 16,
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+  filterButtonText: {
+    fontSize: 12,
+    color: '#333333',
+  },
+  recordControlButtons: {
+    flexDirection: 'row',
+  },
+  recordControlButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 4,
+    marginLeft: 8,
+  },
+  // Enhanced table styles
+  enhancedTableContainer: {
+    width: '100%',
+    borderRadius: 8,
+    overflow: 'hidden',
+    marginVertical: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  enhancedTableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#0A7EA4', 
+    padding: 8,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+  },
+  enhancedHeaderCell: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  enhancedTimeCell: {
+    width: '12%',
+    paddingHorizontal: 2,
+  },
+  enhancedDirectionCell: {
+    width: '12%',
+    paddingHorizontal: 2,
+  },
+  enhancedTableCell: {
+    width: '15%',
+    paddingHorizontal: 2,
+  },
+  enhancedOperationCell: {
+    width: '15%',
+    paddingHorizontal: 2,
+  },
+  enhancedActionCell: {
+    width: '15%',
+    paddingHorizontal: 2,
+  },
+  enhancedActionText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#555',
+  },
+  enhancedRecordsCell: {
+    width: '8%',
+    paddingHorizontal: 2,
+    textAlign: 'center',
+  },
+  enhancedStatusCell: {
+    width: '10%',
+    paddingHorizontal: 2,
+  },
+  enhancedDataCell: {
+    flex: 1,
+    paddingHorizontal: 2,
+  },
+  enhancedCell: {
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  enhancedTableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    padding: 6,
+  },
+  enhancedTableRowAlt: {
+    backgroundColor: '#f9f9f9',
+  },
+  enhancedTableRowError: {
+    backgroundColor: 'rgba(255, 90, 95, 0.1)',
+  },
+  enhancedTimeText: {
+    fontSize: 12,
+    color: '#333333',
+    fontWeight: '500',
+  },
+  enhancedTimeSubtext: {
+    fontSize: 9,
+    color: '#666666',
+  },
+  enhancedDirectionIcon: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 2,
+  },
+  enhancedSentIcon: {
+    backgroundColor: '#4CAF50',
+  },
+  enhancedReceivedIcon: {
+    backgroundColor: '#2196F3',
+  },
+  enhancedSentCell: {
+    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+  },
+  enhancedReceivedCell: {
+    backgroundColor: 'rgba(33, 150, 243, 0.1)',
+  },
+  enhancedDirectionIconText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  enhancedDirectionText: {
+    fontSize: 10,
+    color: '#333333',
+  },
+  enhancedTableIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 4,
+  },
+  enhancedTableText: {
+    fontSize: 11,
+    color: '#333333',
+  },
+  enhancedOperationText: {
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  enhancedStatusIndicator: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  enhancedSuccessIndicator: {
+    backgroundColor: '#4CAF50',
+  },
+  enhancedErrorIndicator: {
+    backgroundColor: '#FF5252',
+  },
+  enhancedStatusText: {
+    color: 'white',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  enhancedDataText: {
+    color: '#0A7EA4',
+    fontSize: 11,
+    textAlign: 'center',
+  },
+  enhancedTableScrollView: {
+    maxHeight: 400,
+  },
+  enhancedExpandedDataContainer: {
+    padding: 10,
+    backgroundColor: '#f5f5f5',
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
+  },
+  enhancedExpandedDataHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  enhancedExpandedDataTitle: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#333333',
+  },
+  enhancedExpandedDataError: {
+    fontSize: 12,
+    color: '#f44336',
+  },
+  enhancedDataScrollView: {
+    maxHeight: 200,
+  },
+  enhancedDataJsonText: {
+    fontSize: 11,
+    fontFamily: 'monospace',
+    color: '#333333',
+  },
+  enhancedEmptyState: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  enhancedEmptyText: {
+    fontSize: 14,
+    color: '#333333',
+  },
+  enhancedLoadMoreButton: {
+    backgroundColor: '#0A7EA4',
+    padding: 8,
+    alignItems: 'center',
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+  },
+  enhancedLoadMoreText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '600',
   },
 }); 

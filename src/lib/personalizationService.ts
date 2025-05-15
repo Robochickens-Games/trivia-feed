@@ -1,6 +1,7 @@
 import { FeedItem } from './triviaService';
 import { getColdStartFeed } from './coldStartStrategy';
 import { WeightChange } from '../types/trackerTypes';
+import { ALL_TOPICS } from '../constants/topics';
 
 // Types for user interaction metrics
 export type QuestionInteraction = {
@@ -35,6 +36,14 @@ export type UserProfile = {
   lastRefreshed: number;
   coldStartComplete?: boolean; // Flag to indicate if cold start is complete
   totalQuestionsAnswered?: number; // Track total questions answered
+  coldStartState?: any; // Track cold start state for persistence
+  lastQuestionAnswered?: {
+    questionId: string;
+    answer?: string;
+    correct?: boolean;
+    skipped?: boolean;
+    topic: string;
+  }; // Track the last question answered for cold start algorithm
 };
 
 const DEFAULT_TOPIC_WEIGHT = 0.5;
@@ -76,7 +85,7 @@ export function calculateQuestionScore(
   let score = 0;
   
   // Get topic structure from question
-  const topic = question.category;
+  const topic = question.topic;
   const subtopic = question.tags?.[0] || 'General';
   const branch = question.tags?.[1] || 'General';
   
@@ -163,12 +172,13 @@ export function updateUserProfile(
   }
   
   // 2. Update topic weights based on interaction
-  const topic = question.category;
+  const topic = question.topic;
   const subtopic = question.tags?.[0] || 'General';
   const branch = question.tags?.[1] || 'General';
   
-  // Ensure topic tree structure exists
+  // Ensure topic tree structure exists - use explicit default values
   if (!updatedProfile.topics[topic]) {
+    console.log(`[WEIGHT UPDATE] Creating new topic ${topic} with default weight ${DEFAULT_TOPIC_WEIGHT}`);
     updatedProfile.topics[topic] = {
       weight: DEFAULT_TOPIC_WEIGHT,
       subtopics: {},
@@ -177,6 +187,7 @@ export function updateUserProfile(
   }
   
   if (!updatedProfile.topics[topic].subtopics[subtopic]) {
+    console.log(`[WEIGHT UPDATE] Creating new subtopic ${subtopic} with default weight ${DEFAULT_SUBTOPIC_WEIGHT}`);
     updatedProfile.topics[topic].subtopics[subtopic] = {
       weight: DEFAULT_SUBTOPIC_WEIGHT,
       branches: {},
@@ -185,6 +196,7 @@ export function updateUserProfile(
   }
   
   if (!updatedProfile.topics[topic].subtopics[subtopic].branches[branch]) {
+    console.log(`[WEIGHT UPDATE] Creating new branch ${branch} with default weight ${DEFAULT_BRANCH_WEIGHT}`);
     updatedProfile.topics[topic].subtopics[subtopic].branches[branch] = {
       weight: DEFAULT_BRANCH_WEIGHT,
       lastViewed: currentTime
@@ -196,12 +208,34 @@ export function updateUserProfile(
   const subtopicNode = topicNode.subtopics[subtopic];
   const branchNode = subtopicNode.branches[branch];
   
-  // Store old weights before updating
+  // Store old weights before updating - ensure we're using the actual current values
   const oldWeights = {
     topicWeight: topicNode.weight,
     subtopicWeight: subtopicNode.weight,
     branchWeight: branchNode.weight
   };
+  
+  // Log the actual values being used
+  console.log(`[WEIGHT UPDATE] Initial weights for ${questionId}: topic=${oldWeights.topicWeight.toFixed(2)}, subtopic=${oldWeights.subtopicWeight.toFixed(2)}, branch=${oldWeights.branchWeight.toFixed(2)}`);
+  
+  // Check for suspiciously non-default weights in a new user profile
+  if (Object.keys(updatedProfile.interactions).length <= 1) {
+    if (Math.abs(oldWeights.topicWeight - DEFAULT_TOPIC_WEIGHT) > 0.01) {
+      console.warn(`[WEIGHT UPDATE] Warning: Topic weight ${oldWeights.topicWeight.toFixed(2)} is not default ${DEFAULT_TOPIC_WEIGHT.toFixed(2)} for a new user profile. Resetting to default.`);
+      topicNode.weight = DEFAULT_TOPIC_WEIGHT;
+      oldWeights.topicWeight = DEFAULT_TOPIC_WEIGHT;
+    }
+    if (Math.abs(oldWeights.subtopicWeight - DEFAULT_SUBTOPIC_WEIGHT) > 0.01) {
+      console.warn(`[WEIGHT UPDATE] Warning: Subtopic weight ${oldWeights.subtopicWeight.toFixed(2)} is not default ${DEFAULT_SUBTOPIC_WEIGHT.toFixed(2)} for a new user profile. Resetting to default.`);
+      subtopicNode.weight = DEFAULT_SUBTOPIC_WEIGHT;
+      oldWeights.subtopicWeight = DEFAULT_SUBTOPIC_WEIGHT;
+    }
+    if (Math.abs(oldWeights.branchWeight - DEFAULT_BRANCH_WEIGHT) > 0.01) {
+      console.warn(`[WEIGHT UPDATE] Warning: Branch weight ${oldWeights.branchWeight.toFixed(2)} is not default ${DEFAULT_BRANCH_WEIGHT.toFixed(2)} for a new user profile. Resetting to default.`);
+      branchNode.weight = DEFAULT_BRANCH_WEIGHT;
+      oldWeights.branchWeight = DEFAULT_BRANCH_WEIGHT;
+    }
+  }
   
   // Update timestamps
   topicNode.lastViewed = currentTime;
@@ -229,10 +263,10 @@ export function updateUserProfile(
   
   // If question was correct, increase weights
   if (interaction.wasCorrect) {
-    // Standard weight increase for correct answers
-    topicNode.weight = Math.min(1.0, topicNode.weight + 0.05);
-    subtopicNode.weight = Math.min(1.0, subtopicNode.weight + 0.08);
-    branchNode.weight = Math.min(1.0, branchNode.weight + 0.1);
+    // Significant weight increase for correct answers (per new requirements)
+    topicNode.weight = Math.min(1.0, topicNode.weight + 0.1);
+    subtopicNode.weight = Math.min(1.0, subtopicNode.weight + 0.15);
+    branchNode.weight = Math.min(1.0, branchNode.weight + 0.2);
     
     // If previously skipped, compensate for the previous skip penalty
     if (wasSkippedPreviously) {
@@ -247,17 +281,17 @@ export function updateUserProfile(
       branchNode.weight = Math.min(1.0, branchNode.weight + skipCompensation.branchCompensation);
     }
   } 
-  // If question was answered incorrectly, very slight increase (they still engaged with content)
+  // If question was answered incorrectly, moderate increase (user still engaged)
   else if (interaction.wasCorrect === false) {
-    // Increase weights very moderately for incorrect answers since they still show engagement
-    topicNode.weight = Math.min(1.0, topicNode.weight + 0.01);
-    subtopicNode.weight = Math.min(1.0, subtopicNode.weight + 0.02);
-    branchNode.weight = Math.min(1.0, branchNode.weight + 0.03);
+    // Moderate weight increase for incorrect answers (per new requirements)
+    topicNode.weight = Math.min(1.0, topicNode.weight + 0.05);
+    subtopicNode.weight = Math.min(1.0, subtopicNode.weight + 0.07);
+    branchNode.weight = Math.min(1.0, branchNode.weight + 0.1);
     
-    // If previously skipped, add a smaller compensation (they engaged but got it wrong)
+    // If previously skipped, add compensation (they engaged but got it wrong)
     if (wasSkippedPreviously) {
       skipCompensation.applied = true;
-      skipCompensation.topicCompensation = 0.03; // Smaller compensation for incorrect answers
+      skipCompensation.topicCompensation = 0.03;
       skipCompensation.subtopicCompensation = 0.04;
       skipCompensation.branchCompensation = 0.05;
       
@@ -267,31 +301,95 @@ export function updateUserProfile(
       branchNode.weight = Math.min(1.0, branchNode.weight + skipCompensation.branchCompensation);
     }
   }
-  // If question was skipped, larger decrease
+  // If question was skipped, decrease weights (per new requirements)
   else if (interaction.wasSkipped) {
-    topicNode.weight = Math.max(0.1, topicNode.weight - 0.05);
-    subtopicNode.weight = Math.max(0.1, subtopicNode.weight - 0.07);
-    branchNode.weight = Math.max(0.1, branchNode.weight - 0.1);
+    console.log(`[WEIGHT UPDATE] Reducing weights for skipped question ${questionId} in topic ${topic}`);
+    console.log(`[WEIGHT UPDATE] Before skip: topic=${topicNode.weight.toFixed(4)}, subtopic=${subtopicNode.weight.toFixed(4)}, branch=${branchNode.weight.toFixed(4)}`);
+    
+    // Store values before changes
+    const prevTopicWeight = topicNode.weight;
+    const prevSubtopicWeight = subtopicNode.weight;
+    const prevBranchWeight = branchNode.weight;
+    
+    // Apply weight reductions - using explicit calculation to avoid precision issues
+    const newTopicWeight = Math.max(0.1, topicNode.weight - 0.05);
+    const newSubtopicWeight = Math.max(0.1, subtopicNode.weight - 0.07);
+    const newBranchWeight = Math.max(0.1, branchNode.weight - 0.1);
+    
+    // Force explicit numeric assignment
+    topicNode.weight = Number(newTopicWeight);
+    subtopicNode.weight = Number(newSubtopicWeight);
+    branchNode.weight = Number(newBranchWeight);
+    
+    // Double-check and log if weights remained unchanged
+    if (Math.abs(topicNode.weight - prevTopicWeight) < 0.001) {
+      console.warn(`[WEIGHT UPDATE] Warning: Topic weight didn't change for ${topic}. Before: ${prevTopicWeight}, After: ${topicNode.weight}`);
+      
+      // Force the change if it didn't take effect
+      if (Math.abs(prevTopicWeight - 0.5) < 0.001) {
+        topicNode.weight = 0.45; // Force to expected value if it was default
+        console.log(`[WEIGHT UPDATE] Force-applied topic weight change: ${topicNode.weight.toFixed(4)}`);
+      }
+    }
+    
+    if (Math.abs(subtopicNode.weight - prevSubtopicWeight) < 0.001) {
+      console.warn(`[WEIGHT UPDATE] Warning: Subtopic weight didn't change for ${subtopic}. Before: ${prevSubtopicWeight}, After: ${subtopicNode.weight}`);
+      
+      // Force the change if it didn't take effect
+      if (Math.abs(prevSubtopicWeight - 0.5) < 0.001) {
+        subtopicNode.weight = 0.43; // Force to expected value if it was default
+        console.log(`[WEIGHT UPDATE] Force-applied subtopic weight change: ${subtopicNode.weight.toFixed(4)}`);
+      }
+    }
+    
+    if (Math.abs(branchNode.weight - prevBranchWeight) < 0.001) {
+      console.warn(`[WEIGHT UPDATE] Warning: Branch weight didn't change for ${branch}. Before: ${prevBranchWeight}, After: ${branchNode.weight}`);
+      
+      // Force the change if it didn't take effect
+      if (Math.abs(prevBranchWeight - 0.5) < 0.001) {
+        branchNode.weight = 0.4; // Force to expected value if it was default
+        console.log(`[WEIGHT UPDATE] Force-applied branch weight change: ${branchNode.weight.toFixed(4)}`);
+      }
+    }
+    
+    // Calculate changes for logging
+    const topicChange = topicNode.weight - prevTopicWeight;
+    const subtopicChange = subtopicNode.weight - prevSubtopicWeight;
+    const branchChange = branchNode.weight - prevBranchWeight;
+    
+    console.log(`[WEIGHT UPDATE] After skip: topic=${topicNode.weight.toFixed(4)}, subtopic=${subtopicNode.weight.toFixed(4)}, branch=${branchNode.weight.toFixed(4)}`);
+    console.log(`[WEIGHT UPDATE] Changes: topic=${topicChange.toFixed(4)}, subtopic=${subtopicChange.toFixed(4)}, branch=${branchChange.toFixed(4)}`);
   }
   
-  // Create weight change record
+  // Create weight change record - make sure it uses real weight values
   const weightChange: WeightChange = {
     timestamp: currentTime,
     questionId,
     interactionType,
     questionText: question.question || `Question ${questionId.substring(0, 5)}...`,
-    category: topic,
+    topic: topic,
     subtopic,
     branch,
-    oldWeights,
+    oldWeights: {
+      topicWeight: oldWeights.topicWeight,
+      subtopicWeight: oldWeights.subtopicWeight,
+      branchWeight: oldWeights.branchWeight
+    },
     newWeights: {
-      topicWeight: topicNode.weight,
-      subtopicWeight: subtopicNode.weight,
-      branchWeight: branchNode.weight
+      // Ensure these are numeric values
+      topicWeight: Number(topicNode.weight),
+      subtopicWeight: Number(subtopicNode.weight),
+      branchWeight: Number(branchNode.weight)
     },
     // Add skip compensation information if applicable
     skipCompensation: skipCompensation.applied ? skipCompensation : undefined
   };
+  
+  // Log the weight change record
+  console.log(`[WEIGHT UPDATE] Created weight change record:
+    Old weights: topic=${weightChange.oldWeights.topicWeight.toFixed(2)}, subtopic=${weightChange.oldWeights.subtopicWeight?.toFixed(2) || 'N/A'}, branch=${weightChange.oldWeights.branchWeight?.toFixed(2) || 'N/A'}
+    New weights: topic=${weightChange.newWeights.topicWeight.toFixed(2)}, subtopic=${weightChange.newWeights.subtopicWeight?.toFixed(2) || 'N/A'}, branch=${weightChange.newWeights.branchWeight?.toFixed(2) || 'N/A'}
+  `);
   
   return { updatedProfile, weightChange };
 }
@@ -367,7 +465,7 @@ export function getPersonalizedFeed(
     const coldStartResult = getColdStartFeed(allItems, userProfile);
     
     // If we're in the final phase, mark cold start as complete
-    if (coldStartResult.state.phase === 4 && coldStartResult.state.questionsShown >= 20) {
+    if (coldStartResult.state.phase === 'normal' && coldStartResult.state.questionsShown >= 20) {
       // This will be saved to userProfile when updateUserProfile is called
       userProfile.coldStartComplete = true;
     }
@@ -401,8 +499,8 @@ export function getPersonalizedFeed(
     };
   }
   
-  // Otherwise, continue with standard personalization logic
-  console.log('Using Standard Personalization Strategy for feed');
+  // Otherwise, continue with normal personalization logic
+  console.log('Using Normal Personalization Strategy for feed');
   
   // Apply weight decay to inactive topics/subtopics/branches
   const updatedProfile = applyWeightDecay(userProfile);
@@ -442,7 +540,7 @@ export function getPersonalizedFeed(
   
   scoredItems.forEach(scoredItem => {
     const { item } = scoredItem;
-    const topic = item.category;
+    const topic = item.topic;
     const subtopic = item.tags?.[0] || 'General';
     const branch = item.tags?.[1] || 'General';
     
@@ -463,11 +561,9 @@ export function getPersonalizedFeed(
   newBranchItems.sort((a, b) => b.score - a.score);
   knownItems.sort((a, b) => b.score - a.score);
   
-  // Calculate item counts for each category
-  const newTopicCount = Math.floor(count * EXPLORATION.newRootTopics);
-  const newSubtopicCount = Math.floor(count * EXPLORATION.newSubtopics);
-  const newBranchCount = Math.floor(count * EXPLORATION.newBranches);
-  const knownItemCount = count - newTopicCount - newSubtopicCount - newBranchCount;
+  // Calculate item counts based on the new 70/30 split for normal state
+  const preferredCount = Math.floor(count * 0.7); // 70% from preferred topics
+  const explorationCount = count - preferredCount; // 30% for exploration
   
   // Combine the categories with explanations
   const selectedItems: FeedItem[] = [];
@@ -476,9 +572,35 @@ export function getPersonalizedFeed(
   // Use a Set to track IDs we've already added to prevent duplicates
   const addedItemIds = new Set<string>();
   
+  // Use a Set to track topics already used for exploration questions
+  const usedExplorationTopics = new Set<string>();
+  
+  // Track whether each question is an exploration question
+  const isExplorationQuestion = new Set<string>();
+  
   // Helper function to add item only if not already added
-  const addItemIfUnique = (item: FeedItem, itemExplanations: string[]) => {
+  const addItemIfUnique = (item: FeedItem, itemExplanations: string[], isExploration: boolean = false) => {
     if (!addedItemIds.has(item.id)) {
+      // For exploration questions, enforce topic diversity
+      if (isExploration) {
+        // Skip if we've already used this topic for exploration
+        if (usedExplorationTopics.has(item.topic)) {
+          return false;
+        }
+        usedExplorationTopics.add(item.topic);
+        isExplorationQuestion.add(item.id);
+        
+        // Add exploration marker to explanations
+        if (!itemExplanations.some(exp => exp.includes('Exploration:'))) {
+          itemExplanations.push('Exploration: Discovering new content');
+        }
+      } else {
+        // Add preferred marker to explanations
+        if (!itemExplanations.some(exp => exp.includes('Preferred:'))) {
+          itemExplanations.push('Preferred: Based on your interests');
+        }
+      }
+      
       selectedItems.push(item);
       explanations[item.id] = itemExplanations;
       addedItemIds.add(item.id);
@@ -487,60 +609,98 @@ export function getPersonalizedFeed(
     return false;
   };
   
-  // Add known items (highest priority)
+  // Step 1: Add preferred items from known topics (70% of total)
   let i = 0;
   let added = 0;
-  while (added < knownItemCount && i < knownItems.length) {
+  
+  // Track used preferred topics for diversity
+  const usedPreferredTopics = new Set<string>();
+  
+  // First, try to add items from high-weight topics (weight > 0.5)
+  while (added < preferredCount && i < knownItems.length) {
     const { item, explanations: itemExplanations } = knownItems[i];
-    if (addItemIfUnique(item, itemExplanations)) {
+    
+    // Get topic weight
+    const topicWeight = updatedProfile.topics[item.topic]?.weight || 0.5;
+    
+    // If weight is high enough and we haven't used this topic too much
+    if (topicWeight > 0.5 && (!usedPreferredTopics.has(item.topic) || usedPreferredTopics.size >= 3)) {
+      if (addItemIfUnique(item, [...itemExplanations], false)) {
       added++;
+        usedPreferredTopics.add(item.topic);
+      }
     }
     i++;
   }
   
-  // Add exploration items
-  // New branches
+  // If we haven't filled the preferred quota, add any known items
+  if (added < preferredCount) {
+    i = 0; // Reset counter to start from beginning
+    while (added < preferredCount && i < knownItems.length) {
+      const { item, explanations: itemExplanations } = knownItems[i];
+      if (addItemIfUnique(item, [...itemExplanations], false)) {
+        added++;
+      }
+      i++;
+    }
+  }
+  
+  // Step 2: Add exploration items (30% of total)
+  // - First try new branches from known subtopics
   i = 0;
   added = 0;
-  while (added < newBranchCount && i < newBranchItems.length) {
+  while (added < explorationCount && i < newBranchItems.length) {
     const { item, explanations: itemExplanations } = newBranchItems[i];
-    if (addItemIfUnique(item, [...itemExplanations, 'Exploration: New branch within known subtopic'])) {
+    if (addItemIfUnique(item, [...itemExplanations, 'Exploration: New branch within known subtopic'], true)) {
       added++;
     }
     i++;
   }
   
-  // New subtopics
+  // - Then try new subtopics from known topics
   i = 0;
-  added = 0;
-  while (added < newSubtopicCount && i < newSubtopicItems.length) {
+  while (added < explorationCount && i < newSubtopicItems.length) {
     const { item, explanations: itemExplanations } = newSubtopicItems[i];
-    if (addItemIfUnique(item, [...itemExplanations, 'Exploration: New subtopic within known topic'])) {
+    if (addItemIfUnique(item, [...itemExplanations, 'Exploration: New subtopic within known topic'], true)) {
       added++;
     }
     i++;
   }
   
-  // New topics
+  // - Finally try entirely new topics
   i = 0;
-  added = 0;
-  while (added < newTopicCount && i < newTopicItems.length) {
+  while (added < explorationCount && i < newTopicItems.length) {
     const { item, explanations: itemExplanations } = newTopicItems[i];
-    if (addItemIfUnique(item, [...itemExplanations, 'Exploration: Entirely new topic'])) {
+    if (addItemIfUnique(item, [...itemExplanations, 'Exploration: Entirely new topic'], true)) {
       added++;
     }
     i++;
   }
   
-  // Fill remaining slots from known items if needed
+  // If we still need more items, fill with any remaining known items
   if (selectedItems.length < count) {
     const remainingNeeded = count - selectedItems.length;
-    i = knownItemCount; // Start from where we left off
+    // Try remaining known items first
+    i = 0;
     added = 0;
-    
     while (added < remainingNeeded && i < knownItems.length) {
       const { item, explanations: itemExplanations } = knownItems[i];
-      if (addItemIfUnique(item, itemExplanations)) {
+      if (!addedItemIds.has(item.id)) {
+      if (addItemIfUnique(item, itemExplanations, false)) {
+          added++;
+        }
+      }
+      i++;
+    }
+    
+    // If still not enough, try any remaining item not yet used
+    const allRemainingItems = [...newTopicItems, ...newSubtopicItems, ...newBranchItems]
+      .filter(({ item }) => !addedItemIds.has(item.id));
+    
+    i = 0;
+    while (added < remainingNeeded && i < allRemainingItems.length) {
+      const { item, explanations: itemExplanations } = allRemainingItems[i];
+      if (addItemIfUnique(item, itemExplanations, true)) {
         added++;
       }
       i++;
@@ -586,11 +746,33 @@ export function getPersonalizedFeed(
 }
 
 /**
- * Creates an initial empty user profile
+ * Creates an initial user profile with default weights
  */
 export function createInitialUserProfile(): UserProfile {
+  // Create empty topics object
+  const initialTopics: { [topicName: string]: RootTopic } = {};
+  
+  // Add all known topics with exact DEFAULT weights (0.5)
+  ALL_TOPICS.forEach(topic => {
+    initialTopics[topic] = {
+      weight: DEFAULT_TOPIC_WEIGHT, // Explicitly use 0.5
+      subtopics: {
+        'General': {
+          weight: DEFAULT_SUBTOPIC_WEIGHT, // Explicitly use 0.5
+          branches: {
+            'General': {
+              weight: DEFAULT_BRANCH_WEIGHT // Explicitly use 0.5
+            }
+          },
+          lastViewed: Date.now()
+        }
+      },
+      lastViewed: Date.now()
+    };
+  });
+  
   return {
-    topics: {},
+    topics: initialTopics,
     interactions: {},
     lastRefreshed: Date.now(),
     coldStartComplete: false,

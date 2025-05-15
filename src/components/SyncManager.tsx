@@ -9,16 +9,11 @@ import {
   loadUserDataStart,
   loadUserDataSuccess
 } from '../store/triviaSlice';
+import type { UserProfile } from '../lib/personalizationService';
 import { 
-  syncUserProfile, 
-  syncUserInteractions,
-  syncFeedChanges,
-  fetchUserProfile,
-  fetchUserInteractions,
-  fetchFeedChanges,
-  fetchWeightChanges,
-  cleanupFeedChanges
-} from '../lib/syncService';
+  syncUserProfile,
+  fetchUserProfile
+} from '../lib/simplifiedSyncService';
 import { View, Text, StyleSheet } from 'react-native';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../store';
@@ -30,8 +25,9 @@ interface SyncManagerProps {
 /**
  * SyncManager Component
  * 
- * Handles background synchronization of user profile, interaction data, and database cleanup
- * with Supabase when the user is authenticated.
+ * Handles background synchronization of user profile with Supabase
+ * when the user is authenticated. Uses a simplified approach with
+ * all data in a single table.
  */
 export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
   const { user } = useAuth();
@@ -42,8 +38,6 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
   
   // Get selector data from Redux store
   const userProfile = useAppSelector(state => state.trivia.userProfile);
-  const syncedInteractions = useAppSelector(state => state.trivia.syncedInteractions);
-  const syncedFeedChanges = useAppSelector(state => state.trivia.syncedFeedChanges);
   const lastSyncTime = useAppSelector(state => state.trivia.lastSyncTime);
   const isSyncing = useAppSelector(state => state.trivia.isSyncing);
   
@@ -65,62 +59,32 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
         dispatch(loadUserDataStart());
         console.log('SyncManager: Loading initial user data');
         
-        // Aggressive cleanup when app starts
-        await cleanupFeedChanges(user.id);
+        // Load user profile from database
+        const profile = await fetchUserProfile(user.id);
         
-        // Load interactions
-        const interactions = await fetchUserInteractions(user.id, lastSyncTime);
-        
-        // Load feed changes - limited to 100 entries
-        const feedChanges = await fetchFeedChanges(user.id, lastSyncTime);
-        
-        // Load weight changes
-        const weightChanges = await fetchWeightChanges(user.id, lastSyncTime);
-        
-        dispatch(loadUserDataSuccess({ 
-          profile: userProfile, 
-          interactions, 
-          feedChanges,
-          weightChanges,
-          timestamp: Date.now()
-        }));
+        if (profile) {
+          dispatch(loadUserDataSuccess({ 
+            profile,
+            timestamp: Date.now()
+          }));
+        } else {
+          // If no profile exists, use the current one and upload it
+          await syncUserProfile(user.id, userProfile);
+          dispatch(loadUserDataSuccess({ 
+            profile: userProfile,
+            timestamp: Date.now()
+          }));
+        }
         
         setInitialDataLoaded(true);
       } catch (error) {
         console.error('SyncManager: Error loading initial data:', error);
+        dispatch(syncFailed());
       }
     };
     
     loadInitialData();
   }, [user, userProfile, initialDataLoaded, lastSyncTime, dispatch]);
-  
-  // Periodically run cleanup to prevent database bloat
-  useEffect(() => {
-    // Skip if no user
-    if (!user || !user.id) return;
-    
-    console.log('SyncManager: Setting up cleanup interval');
-    
-    const cleanupInterval = setInterval(() => {
-      const userId = userIdRef.current;
-      if (!userId) return;
-      
-      // Run the cleanup
-      (async () => {
-        try {
-          console.log('SyncManager: Running periodic cleanup');
-          await cleanupFeedChanges(userId);
-        } catch (error) {
-          console.error('SyncManager: Error during periodic cleanup:', error);
-        }
-      })();
-    }, 15 * 60 * 1000); // Run every 15 minutes
-    
-    // Cleanup on unmount
-    return () => {
-      clearInterval(cleanupInterval);
-    };
-  }, [user]);
   
   // Fetch remote profile on initial load when authenticated
   useEffect(() => {
@@ -140,14 +104,7 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
             // If the remote profile is newer than our local profile, use it
             if (remoteProfile.lastRefreshed > userProfile.lastRefreshed) {
               dispatch(updateUserProfile({ 
-                profile: {
-                  ...remoteProfile,
-                  // Merge interactions with local data to avoid losing any
-                  interactions: {
-                    ...userProfile.interactions,
-                    ...remoteProfile.interactions
-                  }
-                },
+                profile: remoteProfile,
                 userId: user.id
               }));
               console.log('SyncManager: Updated local profile with remote data');
@@ -174,7 +131,7 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
     initializeProfile();
   }, [user, initialized, dispatch, userProfile]);
   
-  // Periodically sync changes to the server
+  // Periodically sync changes to the server (every 5 minutes instead of every minute)
   useEffect(() => {
     if (!user) return;
     
@@ -185,30 +142,20 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
         dispatch(startSync());
         console.log('SyncManager: Running periodic sync');
         
-        // Sync profile
+        // Sync profile (now includes interactions as JSON)
         await syncUserProfile(user.id, userProfile);
-        
-        // Sync any unsynchronized interactions
-        if (syncedInteractions.length > 0) {
-          await syncUserInteractions(user.id, syncedInteractions);
-        }
-        
-        // Sync any unsynchronized feed changes
-        if (syncedFeedChanges.length > 0) {
-          await syncFeedChanges(user.id, syncedFeedChanges);
-        }
         
         dispatch(finishSync(Date.now()));
       } catch (error) {
         console.error('SyncManager: Error during periodic sync:', error);
         dispatch(syncFailed());
       }
-    }, 60000); // Sync every minute
+    }, 5 * 60 * 1000); // Sync every 5 minutes (reduced frequency)
     
     return () => {
       clearInterval(syncInterval);
     };
-  }, [user, isSyncing, userProfile, syncedInteractions, syncedFeedChanges, dispatch]);
+  }, [user, isSyncing, userProfile, dispatch]);
   
   // Final sync when the user logs out
   useEffect(() => {
@@ -217,18 +164,8 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
         if (user && user.id) {
           console.log('SyncManager: Performing final sync before unmounting');
           try {
+            // Final sync of everything
             await syncUserProfile(user.id, userProfile);
-            
-            if (syncedInteractions.length > 0) {
-              await syncUserInteractions(user.id, syncedInteractions);
-            }
-            
-            if (syncedFeedChanges.length > 0) {
-              await syncFeedChanges(user.id, syncedFeedChanges);
-            }
-            
-            // Final cleanup before unmounting
-            await cleanupFeedChanges(user.id);
           } catch (error) {
             console.error('SyncManager: Error during final sync:', error);
           }
@@ -237,7 +174,7 @@ export const SyncManager: React.FC<SyncManagerProps> = ({ children }) => {
       
       finalSync();
     };
-  }, [user, userProfile, syncedInteractions, syncedFeedChanges]);
+  }, [user, userProfile]);
   
   return <>{children}</>;
 };

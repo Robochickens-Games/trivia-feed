@@ -25,9 +25,7 @@ import { AuthProvider, useAuth } from '@/src/context/AuthContext';
 import { ThemeProvider as AppThemeProvider } from '@/src/theme/ThemeProvider';
 import { ThemeProvider as CustomThemeProvider } from '@/src/context/ThemeContext';
 import { Colors } from '@/constants/Colors';
-import { SyncManager } from '@/src/components/SyncManager';
-import ThemedLoadingScreen from '@/src/components/ThemedLoadingScreen';
-import BasicLoadingScreen from '@/src/components/BasicLoadingScreen';
+import { SimplifiedSyncManager } from '@/src/components/SimplifiedSyncManager';
 
 // Prevent the splash screen from auto-hiding
 SplashScreen.preventAutoHideAsync();
@@ -198,8 +196,8 @@ function AuthWrapper({ children }: { children: React.ReactNode }) {
       } else {
         console.log('✅ No redirection needed - correct route for auth state');
       }
-    }, 100);
-  }, [user, session, isGuest, segments, isLoading, explicitAuthNavigation]);
+    }, 50);
+  }, [isLoading, user, isGuest, segments, isLoading, explicitAuthNavigation, session, router]);
 
   if (isLoading) {
     return (
@@ -209,7 +207,13 @@ function AuthWrapper({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      <SimplifiedSyncManager>
+        {children}
+      </SimplifiedSyncManager>
+    </>
+  );
 }
 
 export default function RootLayout() {
@@ -365,21 +369,17 @@ export default function RootLayout() {
     }
   }, []);
 
-  // Show loading indicator if app isn't ready yet
+  // Show simplified loading indicator if app isn't ready yet
   if (!appIsReady) {
     return (
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <Provider store={store}>
-          <PersistGate loading={<BasicLoadingScreen message="Loading saved data..." />} persistor={persistor}>
-            <AuthProvider>
-              <AppThemeProvider initialTheme="dark">
-                <CustomThemeProvider>
-                  <ThemedLoadingScreen message="Starting up..." />
-                </CustomThemeProvider>
-              </AppThemeProvider>
-            </AuthProvider>
-          </PersistGate>
-        </Provider>
+        <View style={styles.loadingContainer}>
+          <Image 
+            source={require('../assets/images/icon.png')} 
+            style={styles.loadingIcon} 
+          />
+          <Text style={styles.loadingText}>Starting up...</Text>
+        </View>
       </GestureHandlerRootView>
     );
   }
@@ -387,70 +387,48 @@ export default function RootLayout() {
   // Proceed with the app whether fonts loaded or not
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <AppLoadingContext.Provider value={{ isAppLoading, setIsAppLoading }}>
-        <Provider store={store}>
-          <PersistGate loading={<BasicLoadingScreen message="Loading saved data..." />} persistor={persistor}>
-            <AuthProvider>
-              <AppThemeProvider initialTheme="dark">
-                <CustomThemeProvider>
-                  <NavigationThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-                    <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
-                    <AuthWrapper>
-                      <SyncManager>
-                        <Stack screenOptions={{ headerShown: false }} />
-                      </SyncManager>
-                    </AuthWrapper>
-                    
-                    {/* Overlay the custom loading screen when app is loading */}
-                    {isAppLoading && (
-                      <View style={styles.loadingOverlay}>
-                        <ThemedLoadingScreen message="Preparing your trivia feed..." />
-                      </View>
-                    )}
-                  </NavigationThemeProvider>
-                </CustomThemeProvider>
-              </AppThemeProvider>
-            </AuthProvider>
-          </PersistGate>
-        </Provider>
-      </AppLoadingContext.Provider>
+      <Provider store={store}>
+        <AuthProvider>
+          <AppThemeProvider initialTheme="dark">
+            <CustomThemeProvider>
+              <NavigationThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+                <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
+                <AuthWrapper>
+                  <SimplifiedSyncManager>
+                    <Stack screenOptions={{ headerShown: false }} />
+                  </SimplifiedSyncManager>
+                </AuthWrapper>
+              </NavigationThemeProvider>
+            </CustomThemeProvider>
+          </AppThemeProvider>
+        </AuthProvider>
+      </Provider>
     </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.dark.background,
-    // Apply web-specific styles only for web platform
-    ...(Platform.OS === 'web' 
-      ? {
-          // Use type assertions for web-specific CSS properties
-          height: '100vh' as any,
-          display: 'flex' as any,
-          flexDirection: 'column' as any,
-        } 
-      : {}
-    ),
-  },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: Colors.dark.background,
+    backgroundColor: '#151718',
+  },
+  loadingIcon: {
+    width: 80,
+    height: 80,
+    marginBottom: 20,
   },
   loadingText: {
-    fontSize: 18,
-    color: Colors.dark.text,
+    color: '#ECEDEE',
+    fontSize: 16,
     marginTop: 10,
   },
   loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: Colors.dark.background,
-    zIndex: 1000,
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    zIndex: 100,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

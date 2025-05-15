@@ -128,6 +128,11 @@ export async function recordUserAnswer(
   isCorrect: boolean,
   answerIndex: number
 ): Promise<void> {
+  console.log('User answer recording is disabled. Operations will be client-side only.');
+  return;
+  
+  // Original code commented out
+  /*
   try {
     const { error } = await supabase
       .from('user_answers')
@@ -147,4 +152,5 @@ export async function recordUserAnswer(
   } catch (error) {
     console.error('Unexpected error in recordUserAnswer:', error);
   }
+  */
 } 

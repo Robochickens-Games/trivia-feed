@@ -117,7 +117,7 @@ const StatCard: React.FC<StatCardProps> = ({
 
 // Define the prop types for CategoryProgressCard
 interface CategoryProgressCardProps {
-  category: string;
+  topic: string;
   answeredCount: number;
   totalCount: number;
   color: string;
@@ -125,7 +125,7 @@ interface CategoryProgressCardProps {
 
 // Category progress card
 const CategoryProgressCard: React.FC<CategoryProgressCardProps> = ({ 
-  category, 
+  topic, 
   answeredCount, 
   totalCount, 
   color 
@@ -156,7 +156,7 @@ const CategoryProgressCard: React.FC<CategoryProgressCardProps> = ({
   return (
     <View style={[styles.categoryCard, { backgroundColor }]}>
       <View style={styles.categoryHeader}>
-        <ThemedText style={styles.categoryTitle}>{category}</ThemedText>
+        <ThemedText style={styles.categoryTitle}>{topic}</ThemedText>
         <ThemedText style={styles.categoryCount}>{answeredCount}/{totalCount}</ThemedText>
       </View>
       <View style={[
@@ -293,10 +293,10 @@ const StatsScreen: React.FC = () => {
     };
 
     feedData.forEach(item => {
-      if (!categoryStats[item.category]) {
-        categoryStats[item.category] = { total: 0, correct: 0, answered: 0 };
+      if (!categoryStats[item.topic]) {
+        categoryStats[item.topic] = { total: 0, correct: 0, answered: 0 };
       }
-      categoryStats[item.category].total++;
+      categoryStats[item.topic].total++;
       if (difficultyStats[item.difficulty]) {
         difficultyStats[item.difficulty].total++;
       }
@@ -309,14 +309,14 @@ const StatsScreen: React.FC = () => {
       
       if (questionState.status === 'answered') {
         answered++;
-        categoryStats[question.category].answered++;
+        categoryStats[question.topic].answered++;
         if (difficultyStats[question.difficulty]) {
           difficultyStats[question.difficulty].answered++;
         
           if (questionState.answerIndex !== undefined && 
               question.answers[questionState.answerIndex].isCorrect) {
             correct++;
-            categoryStats[question.category].correct++;
+            categoryStats[question.topic].correct++;
             difficultyStats[question.difficulty].correct++;
           }
         }
@@ -519,7 +519,7 @@ const StatsScreen: React.FC = () => {
           {stats.categories.map((category, index) => (
             <CategoryProgressCard
               key={category.name}
-              category={category.name}
+              topic={category.name}
               answeredCount={category.answered}
               totalCount={category.total}
               color={categoryColors[category.name] || '#0a7ea4'}

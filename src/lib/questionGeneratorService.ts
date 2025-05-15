@@ -124,7 +124,7 @@ export async function getTopicQuestionCounts(): Promise<Record<string, number>> 
     // Count questions by category
     const counts: Record<string, number> = {};
     data?.forEach((item: QuestionCategoryItem) => {
-      const category = item.topic || item.category || 'Unknown'; // Add fallback value
+      const category = item.topic || 'Unknown'; // Use topic directly
       counts[category] = (counts[category] || 0) + 1;
     });
     

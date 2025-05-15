@@ -45,7 +45,6 @@ const { width, height } = Dimensions.get('window');
 type FeedItemProps = {
   item: {
     id: string;
-    category: string;
     question: string;
     answers: {
       text: string;
@@ -57,6 +56,9 @@ type FeedItemProps = {
     backgroundColor: string; // Changed from backgroundImage to backgroundColor
     learningCapsule: string;
     tags?: string[];
+    topic: string;
+    // category is now optional since we've migrated to using topic
+    category?: string;
   };
   onAnswer?: (answerIndex: number, isCorrect: boolean) => void;
   showExplanation?: () => void;
@@ -136,12 +138,14 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
   useEffect(() => {
     // Only apply enhanced glow effects on neon theme
     if (isNeonTheme && Platform.OS === 'web') {
-      // Get the category colors for the current item
+      // Get the category colors for the current item 
+      // Support both category and topic fields
+      const topicOrCategory = item.category || item.topic || 'default';
       let glowColor = NeonColors.dark.primary; // Default cyan
       
-      if (item.category) {
+      if (topicOrCategory) {
         // Use the hex color from the category colors
-        glowColor = getCategoryColor(item.category).hex;
+        glowColor = getCategoryColor(topicOrCategory).hex;
       }
       
       // Create a style element for the glowing background effect
@@ -175,7 +179,7 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
         document.head.removeChild(styleEl);
       };
     }
-  }, [isNeonTheme, item.category]);
+  }, [isNeonTheme, item.category, item.topic]);
   
   const questionState = useAppSelector(state => 
     state.trivia.questions[item.id] as QuestionState | undefined
@@ -571,7 +575,7 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
                       styles.category,
                       { 
                         position: 'absolute',
-                        color: getCategoryColor(item.category).hex || NeonColors.dark.primary,
+                        color: getCategoryColor(item.topic || item.category || 'default').hex || NeonColors.dark.primary,
                         opacity: 0.1,
                         top: 0,
                         left: 0,
@@ -579,7 +583,7 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
                       }
                     ]}
                   >
-                    {item.category}
+                    {item.topic || item.category || 'General'}
                   </Text>
                   
                   {/* Middle glow layer - medium blur */}
@@ -588,7 +592,7 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
                       styles.category, 
                       { 
                         position: 'absolute',
-                        color: getCategoryColor(item.category).hex || NeonColors.dark.primary,
+                        color: getCategoryColor(item.topic || item.category || 'default').hex || NeonColors.dark.primary,
                         opacity: 0.2,
                         top: 0,
                         left: 0,
@@ -596,7 +600,7 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
                       }
                     ]}
                   >
-                    {item.category}
+                    {item.topic || item.category || 'General'}
                   </Text>
                   
                   {/* Main text layer - sharper, full opacity */}
@@ -604,12 +608,12 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
                     style={[
                       styles.category, 
                       { 
-                        color: getCategoryColor(item.category).hex || NeonColors.dark.primary,
+                        color: getCategoryColor(item.topic || item.category || 'default').hex || NeonColors.dark.primary,
                         letterSpacing: 1.2,
                       }
                     ]}
                   >
-                    {item.category}
+                    {item.topic || item.category || 'General'}
                   </Text>
                 </View>
               ) : (
@@ -618,16 +622,16 @@ const FeedItem: React.FC<FeedItemProps> = ({ item, onAnswer, showExplanation, on
                     styles.category, 
                     styles.neonCategoryText, 
                     { 
-                      color: getCategoryColor(item.category).hex || NeonColors.dark.primary,
+                      color: getCategoryColor(item.topic || item.category || 'default').hex || NeonColors.dark.primary,
                       letterSpacing: 1.2,
                     }
                   ]}
                 >
-                  {item.category}
+                  {item.topic || item.category || 'General'}
                 </Text>
               )
             ) : (
-              <Text style={styles.category}>{item.category}</Text>
+              <Text style={styles.topicLabel}>{item.topic || item.category || 'General'}</Text>
             )}
             <View style={[styles.difficulty, { 
               backgroundColor: 
@@ -1039,7 +1043,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
   },
-  category: {
+  topicLabel: {
     color: 'white',
     fontSize: 16,
     fontWeight: 'bold',

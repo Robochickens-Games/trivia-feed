@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient';
-import { getCategoryColor } from './colors';
+import { getTopicColor } from './colors';
+import { getStandardizedTopicName } from '../constants/topics';
 
 // Define the type of trivia question from Supabase
 export interface TriviaQuestion {
@@ -7,7 +8,7 @@ export interface TriviaQuestion {
   question_text?: string;
   question?: string;
   answer_choices?: string[];
-  answers?: Array<{text: string, isCorrect: boolean}>;
+  answers?: {text: string, isCorrect: boolean}[];
   correct_answer?: string;
   difficulty?: string;
   topic?: string;
@@ -24,7 +25,7 @@ export interface TriviaQuestion {
 // Define the app's feed item format that matches our existing components
 export interface FeedItem {
   id: string;
-  category: string;
+  topic: string;
   question: string;
   answers: {
     text: string;
@@ -57,7 +58,7 @@ export interface GeneratorEvent {
 const mockFeedData: FeedItem[] = [
   {
     id: '1',
-    category: 'Science',
+    topic: 'Science',
     question: 'What is the closest star to Earth?',
     answers: [
       { text: 'The Sun', isCorrect: true },
@@ -68,12 +69,12 @@ const mockFeedData: FeedItem[] = [
     difficulty: 'Easy',
     likes: 1245,
     views: 5800,
-    backgroundColor: getCategoryColor('Science'),
+    backgroundColor: getTopicColor('Science'),
     learningCapsule: 'The Sun is about 93 million miles (150 million km) from Earth and is a G-type main-sequence star.'
   },
   {
     id: '2',
-    category: 'History',
+    topic: 'History',
     question: 'Who was the first President of the United States?',
     answers: [
       { text: 'George Washington', isCorrect: true },
@@ -84,12 +85,12 @@ const mockFeedData: FeedItem[] = [
     difficulty: 'Easy',
     likes: 842,
     views: 3200,
-    backgroundColor: getCategoryColor('History'),
+    backgroundColor: getTopicColor('History'),
     learningCapsule: 'George Washington served as the first President from 1789 to 1797 and is often called the "Father of His Country".'
   },
   {
     id: '3',
-    category: 'Geography',
+    topic: 'Geography',
     question: 'What is the largest ocean on Earth?',
     answers: [
       { text: 'The Pacific Ocean', isCorrect: true },
@@ -100,7 +101,7 @@ const mockFeedData: FeedItem[] = [
     difficulty: 'Medium',
     likes: 756,
     views: 2900,
-    backgroundColor: getCategoryColor('Geography'),
+    backgroundColor: getTopicColor('Geography'),
     learningCapsule: 'The Pacific Ocean covers more than 30% of Earth\'s surface and contains more than half of the free water on Earth.'
   }
 ];
@@ -160,7 +161,7 @@ export async function analyzeCorrectAnswers() {
     }
     
     // Analyze each question
-    data.forEach((question, index) => {
+    data.forEach((question: TriviaQuestion, index: number) => {
       console.log(`\n--- Question ${index + 1} ---`);
       console.log(`Question: ${question.question_text || question.question || 'unknown'}`);
       
@@ -382,8 +383,9 @@ export async function fetchTriviaQuestions(limit: number = 20, language: string 
           console.warn(`No valid answers found for question "${questionText}". Using dummy answers.`);
         }
 
-        // Get category/topic
-        const category = question.topic || question.category || 'General';
+        // Get category/topic and standardize it
+        const category = question.topic || question.category || 'General Knowledge';
+        const standardizedTopic = getStandardizedTopicName(category);
         
         // Get subtopic and branch (if available)
         const subtopic = question.subtopic || undefined;
@@ -399,11 +401,11 @@ export async function fetchTriviaQuestions(limit: number = 20, language: string 
         const learningCapsule = question.learning_capsule || question.explanation || 'No additional information available for this question.';
         
         // Get background color based on category
-        const backgroundColor = getCategoryColor(category);
+        const backgroundColor = getTopicColor(category);
 
         return {
           id: question.id || String(Math.random()),
-          category,
+          topic: standardizedTopic,
           question: questionText,
           answers,
           difficulty,

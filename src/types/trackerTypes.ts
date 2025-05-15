@@ -28,7 +28,7 @@ export interface ProfileChange {
  * Represents weight factors used in feed item selection
  */
 export interface WeightFactors {
-  category: string;
+  topic: string;
   topicWeight?: number;
   subtopicWeight?: number;
   preferenceReason?: string;
@@ -55,7 +55,7 @@ export interface WeightChange {
   questionId: string;
   interactionType: 'correct' | 'incorrect' | 'skipped';
   questionText?: string;
-  category: string;
+  topic: string;
   subtopic?: string;
   branch?: string;
   oldWeights: {

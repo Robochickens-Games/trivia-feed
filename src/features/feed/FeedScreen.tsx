@@ -49,7 +49,8 @@ import { fetchTriviaQuestions, FeedItem as FeedItemType, analyzeCorrectAnswers }
 import { useThemeColor } from '@/hooks/useThemeColor';
 import { 
   updateUserProfile, 
-  getPersonalizedFeed
+  getPersonalizedFeed,
+  UserProfile,
 } from '../../lib/personalizationService';
 import { InteractionTracker } from '../../components/InteractionTracker';
 import { useAuth } from '../../context/AuthContext';
@@ -73,6 +74,7 @@ import { NeonColors } from '@/constants/NeonColors';
 import ThemedLoadingScreen from '@/src/components/ThemedLoadingScreen';
 import { useAppLoading } from '@/app/_layout';
 import { Colors } from '@/constants/Colors';
+import { QuestionInteraction } from '../../lib/personalizationService';
 
 const { width, height } = Dimensions.get('window');
 
@@ -435,6 +437,8 @@ const FeedScreen: React.FC = () => {
   const previousIndex = useRef<number>(0);
   // Add ref to track previous userProfile for cold start updates
   const previousUserProfileRef = useRef<typeof userProfile | null>(null);
+  // Add this near the top of the component with other refs
+  const lastVisibleIndexRef = useRef<number | null>(null);
 
   // Get all theme colors at the top level
   const backgroundColor = useThemeColor({}, 'background');
@@ -484,15 +488,15 @@ const FeedScreen: React.FC = () => {
         try {
           const { data } = await supabase
             .from('user_profiles')
-            .select('username')
-            .eq('id', user.id)
+            .select('full_name')
+            .eq('id', user?.id)
             .single();
           
-          if (data?.username) {
-            setProfileUsername(data.username);
+          if (data?.full_name) {
+            setProfileUsername(data.full_name);
           }
         } catch (error) {
-          console.error('Error fetching username:', error);
+          console.error('Error fetching user profile:', error);
         }
       }
     };
@@ -515,12 +519,17 @@ const FeedScreen: React.FC = () => {
 
   // Get user initials for the profile button
   const getInitials = () => {
-    // Use the fetched username if available
+    // Use the fetched full_name if available
     if (profileUsername) {
       return profileUsername.substring(0, 2).toUpperCase();
     }
     
-    // Fallback to default
+    // Fallback to email if available
+    if (user?.email) {
+      return user.email.substring(0, 2).toUpperCase();
+    }
+    
+    // Ultimate fallback
     return 'ZT';
   };
   
@@ -530,7 +539,7 @@ const FeedScreen: React.FC = () => {
       console.log('User is logged in, loading user data');
       
       // Dispatch the thunk to load all user data
-      dispatch(loadUserDataThunk(user.id))
+      dispatch(loadUserDataThunk(user?.id))
         .then((userData) => {
           console.log('User data loaded successfully');
           
@@ -544,7 +553,7 @@ const FeedScreen: React.FC = () => {
             dispatch(setPersonalizedFeed({ 
               items, 
               explanations,
-              userId: user.id
+              userId: user?.id
             }));
           }
         })
@@ -922,144 +931,571 @@ const FeedScreen: React.FC = () => {
     };
   }, [lastAnswerTime, isActivelyScrolling, hasViewedTooltip, showTooltip, tooltipPermanentlyDismissed]);
 
-  // When scrolling past a question, mark it as skipped if it wasn't answered and update profile
-  const markPreviousAsSkipped = useCallback((prevIndex: number, newIndex: number) => {
-    // Only mark as skipped when explicitly scrolling down past a question and if we have feed data
-    if (newIndex > prevIndex && personalizedFeed.length > 0) {
-      const previousQuestion = personalizedFeed[prevIndex];
-      const previousQuestionId = previousQuestion.id;
-      const questionState = questions[previousQuestionId];
-      
-      // Early check - don't proceed if already answered or skipped (reduce redundant console logs)
-      if (questionState && (questionState.status === 'answered' || questionState.status === 'skipped')) {
-        return; // Exit early without logging
-      }
-      
-      console.log('Checking if question should be skipped:', previousQuestionId);
-      console.log('Current question state:', questionState);
-      
-      // Only mark as skipped if the question wasn't answered
-      // This ensures that a previously skipped question that gets answered has the answer take precedence
-      if (!questionState || questionState.status === 'unanswered') {
-        // Calculate time spent if startTime exists but timeSpent hasn't been set yet
-        const startTime = interactionStartTimes[previousQuestionId];
-        let timeSpent = 0;
-        
-        if (startTime) {
-          timeSpent = Date.now() - startTime;
-          console.log(`Time spent on question ${previousQuestionId}: ${timeSpent}ms`);
-        } else {
-          console.log(`Warning: No start time recorded for question ${previousQuestionId}`);
-        }
-        
-        // Dispatch skip action to mark question as skipped
-        dispatch(skipQuestion({ questionId: previousQuestionId, userId: user?.id }));
-        
-        // IMPORTANT: Save a copy of the current feed before updating the profile
-        // This prevents the feed from being regenerated by other useEffects
-        const currentFeed = [...personalizedFeed];
-        
-        // Update user profile for personalization
-        const { updatedProfile, weightChange } = updateUserProfile(
-          userProfile,
-          previousQuestionId,
-          { 
-            wasSkipped: true,
-            timeSpent: timeSpent
-          },
-          previousQuestion
-        );
-        
-        // Save updated profile to Redux
-        // IMPORTANT: Pass weightChange to ensure it's tracked in the weights tab
-        dispatch(updateUserProfileAction({ 
-          profile: updatedProfile, 
-          userId: user?.id,
-          weightChange: weightChange || undefined // Convert null to undefined to match expected type
-        }));
-        
-        // Sync weight change with Supabase if user is logged in and weight change exists
-        if (user?.id && weightChange) {
-          syncWeightChanges(user.id, [weightChange]);
-        }
+  // Add a ref to track skip count
+  const skipCountRef = useRef<number>(0);
 
-        // Check if we need to append new questions to the feed
-        const inColdStart = !updatedProfile?.coldStartComplete && 
-                         (updatedProfile?.totalQuestionsAnswered || 0) < 20;
+  const allowedTopics = [
+    'Music',
+    'Science',
+    'Arts',
+    'Technology',
+    'Pop Culture',
+    'Literature',
+    'Entertainment',
+    'Miscellaneous',
+    'Geography'
+  ];
+
+  // Simple function to check if we should add questions at current position
+  const shouldAddQuestionsAtPosition = useCallback((position: number) => {
+    // Add questions at positions 4, 8, 12, 16, 20 (after every 4 questions in cold start)
+    const isCheckpoint = position % 4 === 0 && position <= 20 && position > 0;
+    console.log(`[Feed] Checking position ${position} for checkpoint: ${isCheckpoint ? 'YES' : 'NO'}`);
+    return isCheckpoint;
+  }, []);
+
+  // Helper function to add questions at checkpoints
+  const addQuestionsAtCheckpoint = useCallback((checkpointPosition: number, updatedProfile: UserProfile) => {
+    if (feedData.length > personalizedFeed.length) {
+      console.log(`[Feed] Adding questions at checkpoint position ${checkpointPosition}`);
+      console.log(`[Feed] Current user profile state:`, JSON.stringify(updatedProfile.topics, null, 2));
+      
+      // Create a set of IDs that are already in our feed
+      const currentFeed = [...personalizedFeed];
+      const existingIds = new Set(currentFeed.map(item => item.id));
+      
+      // NEW: Track topics already in the feed to ensure diversity
+      const topicsInCurrentFeed = new Set(currentFeed.map(item => item.topic));
+      console.log(`[Feed] Topics already in current feed: ${Array.from(topicsInCurrentFeed).join(', ')}`);
+      
+      // Get questions that aren't already in our feed
+      const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
+      
+      // Force cold start strategy during cold start phase (position <= 20)
+      const totalInteractions = Object.keys(updatedProfile.interactions || {}).length;
+      const totalQuestionsAnswered = updatedProfile.totalQuestionsAnswered || 0;
+      const forceColdStart = checkpointPosition <= 20; // Always use cold start logic for checkpoints <= 20
+      
+      console.log(`[Feed] Checkpoint ${checkpointPosition}: Using ${forceColdStart ? 'cold start' : 'personalized'} logic`);
+      console.log(`[Feed] Current state: totalInteractions=${totalInteractions}, totalQuestionsAnswered=${totalQuestionsAnswered}`);
+      
+      // Set temporary flag to ensure cold start logic is used
+      if (forceColdStart) {
+        // Make a deep copy to avoid modifying the original
+        const tempProfile = JSON.parse(JSON.stringify(updatedProfile));
         
-        // Always append questions when skipping to avoid running out
-        if (feedData.length > currentFeed.length) {
-          console.log('Skipped question - maintaining feed continuity');
-          
-          // Create a set of IDs that are already in our feed
-          const existingIds = new Set(currentFeed.map(item => item.id));
-          
-          // Use the personalization system to get additional questions
-          // Get questions that aren't already in our feed
-          const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
-          
-          // Use personalization logic to select new questions instead of sequential selection
-          const { items: personalizedItems, explanations: personalizedExplanations } = 
-            getPersonalizedFeed(availableQuestions, updatedProfile, 5);
+        // Make sure coldStartComplete is false to trigger cold start logic
+        tempProfile.coldStartComplete = false;
+        
+        // NEW: Update the cold start state to include the already shown topics in this session
+        if (tempProfile.coldStartState) {
+          try {
+            const coldStartState = JSON.parse(JSON.stringify(tempProfile.coldStartState));
             
-          // Take only questions we don't already have
-          const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 3);
-          
-          if (newQuestions.length > 0) {
-            console.log(`Appending ${newQuestions.length} personalized questions to feed after skip`);
+            // Make sure topicsShown includes all topics we've shown in this session
+            if (Array.isArray(coldStartState.topicsShown)) {
+              const existingTopicsShown = new Set(coldStartState.topicsShown);
+              
+              // Add current feed topics to the topics shown
+              topicsInCurrentFeed.forEach(topic => {
+                if (!existingTopicsShown.has(topic)) {
+                  coldStartState.topicsShown.push(topic);
+                  console.log(`[Feed] Added topic ${topic} to cold start state topicsShown`);
+                }
+              });
+            }
             
-            // Create a new feed with existing + new questions
-            const updatedFeed = [...currentFeed, ...newQuestions];
+            // NEW: Update the recentTopics array to include the most recent topics
+            if (Array.isArray(coldStartState.recentTopics)) {
+              // Get the 5 most recent topics from current feed (last 5 items)
+              const recentFeedTopics = currentFeed.slice(-5).map(item => item.topic).reverse();
+              
+              // Create a new recentTopics array with the most recent feed topics first
+              coldStartState.recentTopics = [...recentFeedTopics, 
+                ...coldStartState.recentTopics.filter((t: string) => !recentFeedTopics.includes(t))
+              ].slice(0, 5);
+              
+              console.log(`[Feed] Updated recentTopics in cold start state: ${coldStartState.recentTopics.join(', ')}`);
+            }
             
-            // Add additional explanation about why we added them
-            const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+            // NEW: Update the lastSelectedTopics array to include the most recent topics
+            if (Array.isArray(coldStartState.lastSelectedTopics)) {
+              // Get the 4 most recent topics from current feed (last 4 items)
+              const lastSelectedFeedTopics = currentFeed.slice(-4).map(item => item.topic).reverse();
+              
+              // Create a new lastSelectedTopics array with the most recent feed topics first
+              coldStartState.lastSelectedTopics = [...lastSelectedFeedTopics, 
+                ...coldStartState.lastSelectedTopics.filter((t: string) => !lastSelectedFeedTopics.includes(t))
+              ].slice(0, 4);
+              
+              console.log(`[Feed] Updated lastSelectedTopics in cold start state: ${coldStartState.lastSelectedTopics.join(', ')}`);
+            }
             
-            // Add the explanations from the personalization system plus our continuity message
-            newQuestions.forEach((item: FeedItemType) => {
-              combinedExplanations[item.id] = [
-                ...(personalizedExplanations[item.id] || []),
-                `Added after skipping a question to maintain feed continuity`
-              ];
-            });
-            
-            // Update the feed in Redux
-            dispatch(setPersonalizedFeed({
-              items: updatedFeed,
-              explanations: combinedExplanations,
-              userId: user?.id
-            }));
+            // Update the temp profile with the modified cold start state
+            tempProfile.coldStartState = coldStartState;
+          } catch (e) {
+            console.error('[Feed] Error updating cold start state:', e);
           }
         }
         
-        console.log('Skipped question:', previousQuestionId, 
-          'Time spent:', timeSpent,
-          'Tags:', previousQuestion.tags || 'None');
+        // Force the client-side weights to be used instead of any potentially stale weights
+        // Ensure the topics from Redux userProfile are properly included
+        if (userProfile && userProfile.topics) {
+          console.log(`[Feed] Using latest client-side weights from userProfile`);
+          // Log each topic weight for debugging
+          Object.entries(userProfile.topics).forEach(([topic, data]) => {
+            console.log(`[Feed] Topic '${topic}' weight: ${data.weight}`);
+            // Ensure tempProfile has the latest weights from redux store
+            if (!tempProfile.topics[topic]) {
+              tempProfile.topics[topic] = { ...data };
+            } else {
+              tempProfile.topics[topic].weight = data.weight;
+            }
+          });
+        }
+        
+        // Log the complete profile for debugging
+        console.log(`[Feed] Final profile for question selection: ${JSON.stringify(tempProfile.topics, null, 2)}`);
+        
+        // Determine the correct phase based on checkpoint position
+        let forcedPhase: 'exploration' | 'branching' | 'normal' | undefined;
+        
+        if (checkpointPosition < 5) {
+          forcedPhase = 'exploration'; // Positions 1-4 use exploration phase
+          console.log(`[Feed] Forcing exploration phase at position ${checkpointPosition}`);
+        } else if (checkpointPosition < 20) {
+          forcedPhase = 'branching'; // Positions 5-19 use branching phase
+          console.log(`[Feed] Forcing branching phase at position ${checkpointPosition}`);
+        } else {
+          forcedPhase = 'normal'; // Position 20+ use normal phase
+          console.log(`[Feed] Forcing normal phase at position ${checkpointPosition}`);
+        }
+        
+        // Import getColdStartFeed from the coldStartStrategy
+        const { getColdStartFeed } = require('../../lib/coldStartStrategy');
+        
+        // Use the cold start feed generator with the forced phase
+      const { items: personalizedItems, explanations: personalizedExplanations } = 
+          getColdStartFeed(availableQuestions, tempProfile, undefined, forcedPhase);
+        
+      // Take only questions we don't already have
+        const newQuestions = personalizedItems.filter((item: FeedItemType) => !existingIds.has(item.id)).slice(0, 4);
+      
+      if (newQuestions.length > 0) {
+          console.log(`[Feed] Appending ${newQuestions.length} cold start questions at checkpoint position ${checkpointPosition}`);
+          
+          // Log which topics were selected for debugging
+          const selectedTopics = newQuestions.map((q: FeedItemType) => q.topic);
+          console.log(`[Feed] Selected topics at checkpoint ${checkpointPosition}: ${selectedTopics.join(', ')}`);
+          
+          // NEW: Log how many unique topics we have for diversity check
+          const allTopicsAfterAddition = new Set([...topicsInCurrentFeed, ...selectedTopics]);
+          console.log(`[Feed] Feed will have ${allTopicsAfterAddition.size} unique topics after addition`);
+          
+          // Log if these are exploration or branching questions
+          const isExploration = checkpointPosition === 4; // First checkpoint is exploration
+          const isBranching = checkpointPosition > 4 && checkpointPosition <= 20; // 8, 12, 16, 20 are branching
+          console.log(`[Feed] Question type: ${isExploration ? 'Exploration' : isBranching ? 'Branching' : 'Normal'}`);
+        
+        // Create a new feed with existing + new questions
+        const updatedFeed = [...currentFeed, ...newQuestions];
+        
+        // Add additional explanation about why we added them
+        const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+        
+        // Add the explanations from the personalization system plus our position message
+        newQuestions.forEach((item: FeedItemType) => {
+          combinedExplanations[item.id] = [
+            ...(personalizedExplanations[item.id] || []),
+            `Added at cold start checkpoint position ${checkpointPosition}`
+          ];
+        });
+        
+        // Update the feed in Redux with the combined feed
+        dispatch(setPersonalizedFeed({
+          items: updatedFeed,
+          explanations: combinedExplanations,
+            userId: user?.id || undefined // Handle nullable user
+        }));
+      } else {
+        console.log(`[Feed] No new questions were found to add at checkpoint ${checkpointPosition}`);
+        }
+      } else {
+        // Use standard personalization logic for positions > 20
+        const { items: personalizedItems, explanations: personalizedExplanations } = 
+          getPersonalizedFeed(availableQuestions, updatedProfile, 4);
+        
+        // Take only questions we don't already have
+        const newQuestions = personalizedItems.filter((item: FeedItemType) => !existingIds.has(item.id)).slice(0, 4);
+        
+        if (newQuestions.length > 0) {
+          console.log(`[Feed] Appending ${newQuestions.length} personalized questions at checkpoint position ${checkpointPosition}`);
+          
+          // Create a new feed with existing + new questions
+          const updatedFeed = [...currentFeed, ...newQuestions];
+          
+          // Add additional explanation about why we added them
+          const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+          
+          // Add the explanations from the personalization system plus our position message
+          newQuestions.forEach((item: FeedItemType) => {
+            combinedExplanations[item.id] = [
+              ...(personalizedExplanations[item.id] || []),
+              `Added at normal checkpoint position ${checkpointPosition}`
+            ];
+          });
+          
+          // Update the feed in Redux with the combined feed
+          dispatch(setPersonalizedFeed({
+            items: updatedFeed,
+            explanations: combinedExplanations,
+            userId: user?.id || undefined // Handle nullable user
+          }));
+        } else {
+          console.log(`[Feed] No new questions were found to add at checkpoint ${checkpointPosition}`);
+        }
       }
+    } else {
+      console.log('[Feed] No additional questions available in feedData for checkpoint');
     }
-  }, [dispatch, interactionStartTimes, personalizedFeed, questions, user?.id, userProfile, feedData, feedExplanations]);
+  }, [feedData, personalizedFeed, feedExplanations, dispatch, user, userProfile]);
 
-  // Add optimized fast scroll handler to reduce redundant skipping checks
+  // Add debug logs to markPreviousAsSkipped to identify if it's being called correctly
+  const markPreviousAsSkipped = useCallback((prevIndex: number, newIndex: number) => {
+    // Only mark as skipped when explicitly scrolling down past a question and if we have feed data
+    console.log(`[DEBUG] markPreviousAsSkipped called with prevIndex=${prevIndex}, newIndex=${newIndex}`);
+    
+    if (prevIndex >= 0 && prevIndex < personalizedFeed.length && newIndex > prevIndex) {
+      const previousQuestion = personalizedFeed[prevIndex];
+      const previousQuestionId = previousQuestion.id;
+      
+      // Add special logging for first question
+      if (prevIndex === 0) {
+        console.log(`[Feed] FIRST QUESTION being marked as skipped: ID ${previousQuestionId}, question "${previousQuestion.question?.substring(0, 30)}..."`)
+      } else {
+        console.log(`[Feed] Marking question #${prevIndex + 1} as skipped: ID ${previousQuestionId}, question "${previousQuestion.question?.substring(0, 30)}..."`);
+      }
+      
+      // Skip if the question is already marked as skipped or answered
+      if (questions[previousQuestionId] && 
+          (questions[previousQuestionId].status === 'skipped' || 
+           questions[previousQuestionId].status === 'answered')) {
+        console.log(`[Feed] Question ${previousQuestionId} already processed (${questions[previousQuestionId].status}), skipping`);
+        return;
+      }
+      
+      // Get interaction start time if it exists
+      const startTime = interactionStartTimes[previousQuestionId];
+      let timeSpent = 0;
+      
+      if (startTime) {
+        timeSpent = Date.now() - startTime;
+      }
+      
+      // Special case for the first question - force longer timeSpent to ensure it's registered
+      if (prevIndex === 0) {
+        // Force at least 1 second to ensure weight changes register
+        timeSpent = Math.max(timeSpent, 1000);
+        console.log(`[Feed] FIRST QUESTION: Ensuring minimum timeSpent of 1000ms (actual: ${timeSpent}ms)`);
+      }
+      
+      // Mark question as skipped in Redux
+      dispatch(skipQuestion({ 
+        questionId: previousQuestionId,
+        userId: user?.id
+      }));
+      
+      console.log(`[Feed] Dispatched skipQuestion action for question ${previousQuestionId}`);
+      
+      // Update user profile with new weight changes
+      if (user && user.id) {
+        // Create interaction for this skip
+        const interaction: Partial<QuestionInteraction> = {
+          wasSkipped: true,
+          timeSpent
+        };
+        
+        console.log(`[Feed] Updating user profile for skipped question ${previousQuestionId}`);
+        console.log(`[Feed] Before skip - topic weights:`, JSON.stringify(userProfile.topics, null, 2));
+        
+        // Use the personalization service to update the profile
+        const result = updateUserProfile(
+        userProfile,
+        previousQuestionId,
+          interaction,
+        previousQuestion
+      );
+      
+        console.log(`[Feed] After skip - topic weights:`, JSON.stringify(result.updatedProfile.topics, null, 2));
+        console.log(`[Feed] User profile updated, weight change: ${result.weightChange ? 'YES' : 'NO'}`);
+        
+        if (result.weightChange) {
+          console.log(`[Feed] Weight change details: Topic=${result.weightChange.topic}, ${result.weightChange.oldWeights.topicWeight.toFixed(2)} -> ${result.weightChange.newWeights.topicWeight.toFixed(2)}`);
+        }
+        
+        // Save updated profile to Redux BEFORE checkpoint checking
+      dispatch(updateUserProfileAction({ 
+          profile: result.updatedProfile, 
+        userId: user?.id,
+          weightChange: result.weightChange || undefined  // Convert null to undefined
+      }));
+
+      // Increment skip count
+      skipCountRef.current += 1;
+      
+      // Simple check for adding questions
+      // Check if current position (1-indexed) is a checkpoint
+      const currentPosition = prevIndex + 1;
+      
+        // After updating the profile with the skipped question, check for checkpoint
+      if (currentPosition <= 20 && shouldAddQuestionsAtPosition(currentPosition)) {
+          // IMPORTANT: Using the UPDATED profile with latest weights
+          console.log(`[Feed] At checkpoint position ${currentPosition}, adding 4 questions - using UPDATED profile with latest weights`);
+        addQuestionsAtCheckpoint(currentPosition, result.updatedProfile);
+      } else if (currentPosition > 20) {
+        // After position 20 (past cold start) - add 1 question
+        console.log('[Feed] Past cold start, adding one question after skip');
+        
+        // Only proceed if we have feedData to choose from
+        if (feedData.length > personalizedFeed.length) {
+          // Create a set of IDs that are already in our feed
+          const currentFeed = [...personalizedFeed];
+          const existingIds = new Set(currentFeed.map(item => item.id));
+          
+          // Get questions that aren't already in our feed
+          const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
+          
+          if (availableQuestions.length > 0) {
+            // Use personalization logic to select new questions
+              // IMPORTANT: Use the UPDATED profile here too
+            const { items: personalizedItems, explanations: personalizedExplanations } = 
+              getPersonalizedFeed(availableQuestions, result.updatedProfile, 1); // Only get 1 question
+          
+            // Take only the first question
+            const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 1);
+        
+            if (newQuestions.length > 0) {
+              console.log(`[Feed] Adding 1 personalized question to feed after skip`);
+              
+              // Create a new feed with existing + new question
+              const updatedFeed = [...currentFeed, ...newQuestions];
+          
+              // Add additional explanation about why we added this question
+              const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+          
+              // Add the explanations from the personalization system
+              newQuestions.forEach((item: FeedItemType) => {
+                combinedExplanations[item.id] = [
+                  ...(personalizedExplanations[item.id] || []),
+                  `Added after question skip`
+                ];
+              });
+          
+              // Update the feed in Redux - log dispatch for debugging
+              console.log(`[Feed] Dispatching setPersonalizedFeed with ${updatedFeed.length} items`);
+              dispatch(setPersonalizedFeed({
+                items: updatedFeed,
+                explanations: combinedExplanations,
+                userId: user?.id || undefined // Handle null user case
+              }));
+            }
+          }
+        }
+      } else {
+        console.log(`[Feed] Not at a checkpoint position (${currentPosition}), not adding questions`);
+      }
+      } else {
+        console.log('[Feed] User not logged in, skipping add question logic');
+      }
+    } else {
+      console.log(`[Feed] Not marking as skipped - invalid indices or not moving forward: prevIndex=${prevIndex}, newIndex=${newIndex}, personalizedFeed.length=${personalizedFeed.length}`);
+    }
+  }, [personalizedFeed, dispatch, userProfile, user, questions, interactionStartTimes, feedData, feedExplanations, shouldAddQuestionsAtPosition, addQuestionsAtCheckpoint]);
+
+  // Helper function to log feed state for debugging
+  const logFeedState = useCallback(() => {
+    console.log("===== CURRENT FEED STATE =====");
+    console.log(`Feed length: ${personalizedFeed.length} questions`);
+    console.log(`Current index: ${currentIndex}`);
+    
+    // Count topics in feed
+    const topicCounts = new Map<string, number>();
+    personalizedFeed.forEach(item => {
+      const topic = item.topic;
+      topicCounts.set(topic, (topicCounts.get(topic) || 0) + 1);
+    });
+    
+    console.log("Topics in feed:");
+    topicCounts.forEach((count, topic) => {
+      console.log(`  ${topic}: ${count} questions`);
+    });
+    
+    // Count interactions by type
+    let answeredCount = 0;
+    let skippedCount = 0;
+    let pendingCount = 0;
+    
+    personalizedFeed.forEach(item => {
+      const state = questions[item.id];
+      if (!state || state.status === 'unanswered') {
+        pendingCount++;
+      } else if (state.status === 'skipped') {
+        skippedCount++;
+      } else if (state.status === 'answered') {
+        answeredCount++;
+      }
+    });
+    
+    console.log(`Interaction breakdown: ${answeredCount} answered, ${skippedCount} skipped, ${pendingCount} pending`);
+    
+    // Check user profile
+    const totalInteractions = Object.keys(userProfile.interactions || {}).length;
+    const totalQuestionsAnswered = userProfile.totalQuestionsAnswered || 0;
+    const inColdStart = !userProfile.coldStartComplete && totalQuestionsAnswered < 20;
+    
+    console.log(`User profile: ${totalInteractions} interactions, ${totalQuestionsAnswered} questions answered`);
+    console.log(`Cold start: ${inColdStart ? 'active' : 'complete'}`);
+    
+    if (inColdStart) {
+      // Identify cold start phase
+      let phase = 'unknown';
+      if (totalQuestionsAnswered < 5) {
+        phase = 'exploration (1-5)';
+      } else if (totalQuestionsAnswered < 20) {
+        phase = 'branching (6-20)';
+      }
+      console.log(`Cold start phase: ${phase}`);
+    }
+    
+    console.log("===========================");
+    
+    return { inColdStart, totalInteractions, totalQuestionsAnswered };
+  }, [personalizedFeed, currentIndex, questions, userProfile]);
+
+  // Update handleFastScroll to forcibly add questions after a skip
   const handleFastScroll = useCallback((startIndex: number, endIndex: number) => {
     // Don't process if start and end are the same or if scrolling up
-    if (startIndex >= endIndex || !personalizedFeed.length) return;
+    if (startIndex >= endIndex || !personalizedFeed.length) {
+      console.log(`[FastScroll] Skipping processing: startIndex=${startIndex}, endIndex=${endIndex}, moving up or same position`);
+      return;
+    }
     
-    console.log(`Fast scroll detected: ${startIndex} → ~${endIndex}`);
+    console.log(`[FastScroll] Processing fast scroll: ${startIndex} → ~${endIndex}`);
+    console.log(`[FastScroll] Before processing, checking feed state:`);
+    const { inColdStart, totalInteractions, totalQuestionsAnswered } = logFeedState();
     
-    // Process only questions that aren't already marked
-    for (let i = startIndex; i < endIndex; i++) {
-      if (i >= 0 && i < personalizedFeed.length) {
+    const totalSkipped = Math.min(endIndex - startIndex, 5); // Limit to 5 max questions skipped
+    console.log(`[FastScroll] Will attempt to process ${totalSkipped} skipped questions`);
+
+    // Process the skips first
+    let skippedCount = 0;
+    let highestProcessedIndex = -1;
+    
+    // Special handling for first question - always check it
+    const firstQuestionId = personalizedFeed[0]?.id;
+    if (firstQuestionId) {
+      const firstQuestionState = questions[firstQuestionId];
+      if (!firstQuestionState || firstQuestionState.status === 'unanswered') {
+        console.log(`[FastScroll] First question not yet processed, marking as skipped: ${firstQuestionId}`);
+        console.log(`[FastScroll] First question topic: ${personalizedFeed[0]?.topic}`);
+        markPreviousAsSkipped(0, 1);
+        skippedCount++;
+        highestProcessedIndex = 0;
+      }
+    }
+    
+    // Process remaining questions that aren't already marked
+    for (let i = Math.max(1, startIndex); i < endIndex && i < personalizedFeed.length; i++) {
         const question = personalizedFeed[i];
         const questionState = questions[question.id];
         
         // Skip questions that are already processed (answers or skipped)
         if (questionState && (questionState.status === 'answered' || questionState.status === 'skipped')) {
+          console.log(`[FastScroll] Question at index ${i} (${question.id}) already processed as ${questionState.status}, skipping`);
           continue;
         }
         
-        markPreviousAsSkipped(i, endIndex);
+      // Mark as skipped
+      console.log(`[FastScroll] Marking question at index ${i} (${question.id}) as skipped`);
+      console.log(`[FastScroll] Question topic: ${question.topic}`);
+      markPreviousAsSkipped(i, i+1); // Mark this specific question as skipped
+      skippedCount++;
+      if (i > highestProcessedIndex) {
+        highestProcessedIndex = i;
       }
     }
-  }, [personalizedFeed, questions, markPreviousAsSkipped]);
+    
+    // Now check if we need to add questions - simplified logic
+    if (skippedCount > 0) {
+      // Check if current position is a checkpoint (4, 8, 12, 16, 20)
+      // We use position + 1 because our checkpoints are 1-indexed but array is 0-indexed
+      const currentPosition = highestProcessedIndex + 1;
+      
+      console.log(`[FastScroll] Skipped ${skippedCount} questions, highest index was ${highestProcessedIndex}`);
+      console.log(`[FastScroll] Checking if position ${currentPosition} is a checkpoint`);
+      
+      if (currentPosition <= 20 && shouldAddQuestionsAtPosition(currentPosition)) {
+        // At a checkpoint position in cold start - add 4 questions
+        console.log(`[FastScroll] At checkpoint position ${currentPosition}, adding 4 questions`);
+        addQuestionsAtCheckpoint(currentPosition, userProfile);
+      } else if (currentPosition > 20) {
+        // After position 20 (past cold start) - add 1 question
+        console.log(`[FastScroll] Past cold start (position ${currentPosition}), adding 1 question`);
+        
+        // Only proceed if we have feedData to choose from
+        if (feedData.length > personalizedFeed.length) {
+          // Create a set of IDs that are already in our feed
+          const currentFeed = [...personalizedFeed];
+          const existingIds = new Set(currentFeed.map(item => item.id));
+          
+          // Get questions that aren't already in our feed
+          const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
+          
+          if (availableQuestions.length > 0) {
+            // Use personalization logic to select new questions
+            const { items: personalizedItems, explanations: personalizedExplanations } = 
+              getPersonalizedFeed(availableQuestions, userProfile, 1); // Only get 1 question
+          
+            // Take only the first question
+            const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 1);
+        
+            if (newQuestions.length > 0) {
+              console.log(`[FastScroll] Adding 1 personalized question to feed`);
+              console.log(`[FastScroll] Selected topic: ${newQuestions[0].topic}`);
+              
+              // Create a new feed with existing + new question
+              const updatedFeed = [...currentFeed, ...newQuestions];
+          
+              // Add additional explanation about why we added this question
+              const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+          
+              // Add the explanations from the personalization system
+              newQuestions.forEach((item: FeedItemType) => {
+                combinedExplanations[item.id] = [
+                  ...(personalizedExplanations[item.id] || []),
+                  `Added after skip (past cold start)`
+                ];
+              });
+          
+              // Update the feed in Redux - log dispatch for debugging
+              console.log(`[FastScroll] Dispatching setPersonalizedFeed with ${updatedFeed.length} items`);
+              dispatch(setPersonalizedFeed({
+                items: updatedFeed,
+                explanations: combinedExplanations,
+                userId: user?.id || undefined // Handle nullable user
+              }));
+            }
+          }
+        }
+      } else {
+        console.log(`[FastScroll] Not at a checkpoint position (${currentPosition}), not adding questions`);
+      }
+      
+      // Log feed state after processing
+      console.log(`[FastScroll] After processing, checking updated feed state:`);
+      logFeedState();
+    }
+  }, [personalizedFeed, questions, markPreviousAsSkipped, feedData, userProfile, feedExplanations, dispatch, user, addQuestionsAtCheckpoint, shouldAddQuestionsAtPosition, logFeedState]);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     if (event.nativeEvent.contentOffset.y !== 0 && showTooltip) {
@@ -1107,98 +1543,159 @@ const FeedScreen: React.FC = () => {
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       if (viewableItems.length > 0 && viewableItems[0].index !== null && personalizedFeed.length > 0) {
         const newIndex = viewableItems[0].index;
-        // Make sure newIndex is within bounds
-        if (newIndex >= 0 && newIndex < personalizedFeed.length) {
-          const currentItem = personalizedFeed[newIndex];
-          // Add null check for currentItem
-          if (currentItem && currentItem.id) {
-            const currentItemId = currentItem.id;
-
-            // Mark previous question as skipped only when scrolling to a new question that is below the previous one
-            // This ensures we only mark questions as skipped when explicitly scrolled past them
-            if (previousIndex.current !== newIndex && newIndex > previousIndex.current) {
-              markPreviousAsSkipped(previousIndex.current, newIndex);
+        const currentItem = personalizedFeed[newIndex];
+        
+        if (currentItem && currentItem.id) {
+          const currentItemId = currentItem.id;
+          const prevIndex = lastVisibleIndexRef.current;
+          
+          // Enhanced logging to track what's happening
+          console.log(`[ViewableItemsChanged] Moving from index ${prevIndex} to ${newIndex}, item ${currentItemId}`);
+          
+          // Special case for first question skip detection
+          if (newIndex === 1 && (prevIndex === null || prevIndex === 0)) {
+            // We've moved directly to the second question - check if first question was processed
+            const firstQuestionId = personalizedFeed[0].id;
+            const firstQuestionState = questions[firstQuestionId];
+            
+            // Only mark as skipped if it hasn't been processed yet
+            if (!firstQuestionState || firstQuestionState.status === 'unanswered') {
+              console.log(`[ViewableItemsChanged] First question not yet processed, marking as skipped`);
+              markPreviousAsSkipped(0, 1);
+            } else {
+              console.log(`[ViewableItemsChanged] First question already processed as ${firstQuestionState?.status}`);
             }
-
-            previousIndex.current = newIndex;
+          }
+          
+          // Only process if we've actually moved to a new question
+          if (prevIndex !== newIndex) {
+            // Check if we're moving forward AND if prevIndex is not null (handles first question case)
+            if (prevIndex !== null && newIndex > prevIndex) {
+              console.log(`[ViewableItemsChanged] Skipping detected: ${prevIndex} → ${newIndex}`);
+              markPreviousAsSkipped(prevIndex, newIndex);
+            } else if (prevIndex === null && newIndex > 0) {
+              // Handle case where first question was skipped and prevIndex hasn't been set yet
+              console.log(`[ViewableItemsChanged] First question possibly skipped, marking index 0`);
+              markPreviousAsSkipped(0, newIndex);
+            } else {
+              console.log(`[ViewableItemsChanged] Moving backwards or special case, not marking as skipped`);
+            }
+            
+            // Update last visible index
+            lastVisibleIndexRef.current = newIndex;
             lastVisibleItemId.current = currentItemId;
-            setCurrentIndex(newIndex);
             
-            // Start tracking interaction time with this question
-            const currentTime = Date.now();
-            console.log(`Starting interaction tracking for question ${currentItemId} at ${new Date(currentTime).toISOString()}`);
+            // Start tracking interaction with new question
             dispatch(startInteraction({ questionId: currentItemId }));
-            
-            // Immediately check if we already have an existing interaction time
-            setTimeout(() => {
-              const startTime = interactionStartTimes[currentItemId];
-              if (startTime) {
-                console.log(`Confirmed interaction tracking for ${currentItemId}, start time: ${new Date(startTime).toISOString()}`);
-              } else {
-                console.warn(`Failed to start interaction tracking for ${currentItemId}`);
-              }
-            }, 50);
             
             // Set current explanation for debugging
             if (debugPanelVisible && feedExplanations[currentItemId]) {
               setCurrentExplanation(feedExplanations[currentItemId]);
             }
           } else {
-            console.warn(`Invalid feed item at index ${newIndex}: item is undefined or missing ID`);
+            console.log(`[ViewableItemsChanged] Index didn't change, not marking as skipped`);
           }
           
           // Proactively check if we're getting close to the end of the feed (within 3 questions)
           // and append more questions if needed
           if (newIndex >= personalizedFeed.length - 3 && feedData.length > personalizedFeed.length) {
-            console.log('Getting close to the end of the feed, preemptively adding more questions');
-            
             const currentFeed = [...personalizedFeed];
             const existingIds = new Set(currentFeed.map(item => item.id));
-            const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
             
-            // Use personalization logic to select new questions instead of sequential selection
-            const { items: personalizedItems, explanations: personalizedExplanations } = 
-              getPersonalizedFeed(availableQuestions, userProfile, 8);
+            // Get questions that aren't already in our feed and consider weights based on phase
+            const availableQuestions = feedData.filter((item: FeedItemType) => {
+              const totalQuestionsAnswered = userProfile.totalQuestionsAnswered || 0;
+              const isColdStart = !userProfile.coldStartComplete && totalQuestionsAnswered < 20;
               
-            // Take up to 5 new personalized questions
-            const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 5);
+              // Filter by difficulty based on total questions answered
+              const isAppropriateDifficulty = totalQuestionsAnswered < 10 
+                ? ['easy', 'medium'].includes(item.difficulty?.toLowerCase() || '')
+                : true; // Allow all difficulties after first 10 questions
+              
+              if (isColdStart) {
+                // Phase 1 (Questions 1-5): Pure exploration
+                if (totalQuestionsAnswered < 5) {
+                  return !existingIds.has(item.id) && isAppropriateDifficulty;
+                }
+                
+                // Phase 2 (Questions 6-12): Begin using initial topic weights
+                if (totalQuestionsAnswered < 12) {
+                  const isLowWeight = userProfile.topics[item.topic]?.weight < 0.2;
+                  return !existingIds.has(item.id) && !isLowWeight && isAppropriateDifficulty;
+                }
+                
+                // Phase 3 (Questions 13-20): Adaptive Personalization
+                if (totalQuestionsAnswered < 20) {
+                  const isLowWeight = userProfile.topics[item.topic]?.weight < 0.3;
+                  return !existingIds.has(item.id) && !isLowWeight;
+                }
+              } else {
+                // Phase 4 (Beyond 20 questions): Steady state
+                const isLowWeight = userProfile.topics[item.topic]?.weight < 0.2;
+                return !existingIds.has(item.id) && !isLowWeight;
+              }
+              
+              return !existingIds.has(item.id);
+            });
+            
+            // Use personalization logic to select new questions
+            const { items: personalizedItems, explanations: personalizedExplanations } = 
+              getPersonalizedFeed(availableQuestions, userProfile, 4); // Reduced from 8 to 4
+              
+            // Take only 2 new personalized questions (reduced from 5)
+            const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 2);
             
             if (newQuestions.length > 0) {
-              console.log(`Proactively appending ${newQuestions.length} personalized questions to feed`);
-              
               // Create a new feed with existing + new questions
               const updatedFeed = [...currentFeed, ...newQuestions];
+              
+              console.log(`[ViewableItemsChanged] Adding ${newQuestions.length} proactive questions, feed will have ${updatedFeed.length} items`);
               
               // Add additional explanation about why we added them
               const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
               
               // Add the explanations from the personalization system plus our message
               newQuestions.forEach((item: FeedItemType) => {
+                const totalQuestionsAnswered = userProfile.totalQuestionsAnswered || 0;
+                let phaseMessage = '';
+                
+                if (!userProfile.coldStartComplete && totalQuestionsAnswered < 20) {
+                  if (totalQuestionsAnswered < 5) {
+                    phaseMessage = 'Added during initial exploration phase';
+                  } else if (totalQuestionsAnswered < 12) {
+                    phaseMessage = 'Added during topic weight discovery phase';
+                  } else {
+                    phaseMessage = 'Added during adaptive personalization phase';
+                  }
+                } else {
+                  phaseMessage = 'Added during steady state phase';
+                }
+                
                 combinedExplanations[item.id] = [
                   ...(personalizedExplanations[item.id] || []),
-                  `Added to extend feed`
+                  phaseMessage
                 ];
               });
               
               // Update the feed in Redux
               dispatch(setPersonalizedFeed({
                 items: updatedFeed,
-                explanations: combinedExplanations
+                explanations: combinedExplanations,
+                userId: user?.id || undefined // Handle nullable user
               }));
             }
           }
-        } else {
-          console.warn(`Invalid index ${newIndex}: outside of personalizedFeed bounds (0-${personalizedFeed.length - 1})`);
         }
       }
-    },
-    [markPreviousAsSkipped, personalizedFeed, feedExplanations, dispatch, interactionStartTimes, feedData, userProfile, debugPanelVisible]
+    },  // Close the function
+    [markPreviousAsSkipped, personalizedFeed, feedExplanations, dispatch, interactionStartTimes, feedData, userProfile, debugPanelVisible, questions, user?.id]  // Dependencies array
   );
 
   useEffect(() => {
     if (personalizedFeed.length > 0) {
       const firstQuestionId = personalizedFeed[0].id;
       lastVisibleItemId.current = firstQuestionId;
+      lastVisibleIndexRef.current = 0; // Explicitly initialize this ref to 0
       
       // Start tracking interaction with first question
       console.log(`Starting initial interaction tracking for question ${firstQuestionId}`);
@@ -1276,6 +1773,11 @@ const FeedScreen: React.FC = () => {
     const questionItem = personalizedFeed.find(item => item.id === questionId);
     if (!questionItem) return;
     
+    // Find the current position/index in the feed (0-indexed)
+    const currentIndex = personalizedFeed.findIndex(item => item.id === questionId);
+    // Convert to 1-indexed position for our checkpoints
+    const currentPosition = currentIndex + 1;
+    
     // Get interaction start time if it exists
     const startTime = interactionStartTimes[questionId];
     let timeSpent = 0;
@@ -1322,51 +1824,55 @@ const FeedScreen: React.FC = () => {
       weightChange: weightChange || undefined // Convert null to undefined to match expected type
     }));
     
-    // Determine if we should append new questions to maintain feed continuity
-    const inColdStart = !updatedProfile?.coldStartComplete && 
-                        (updatedProfile?.totalQuestionsAnswered || 0) < 20;
-    
+    // Simple logic for adding questions based on position
     if (feedData.length > currentFeed.length) {
-      console.log('Cold start active - maintaining feed continuity');
-      
-      // Create a set of IDs that are already in our feed
-      const existingIds = new Set(currentFeed.map(item => item.id));
-      
-      // Use the personalization system to get additional questions
-      // Get questions that aren't already in our feed
-      const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
-      
-      // Use personalization logic to select new questions instead of sequential selection
-      const { items: personalizedItems, explanations: personalizedExplanations } = 
-        getPersonalizedFeed(availableQuestions, updatedProfile, 5);
+      if (currentPosition <= 20 && shouldAddQuestionsAtPosition(currentPosition)) {
+        // At a checkpoint position in cold start - add 4 questions
+        console.log(`[Feed] At checkpoint position ${currentPosition}, adding 4 questions`);
+        addQuestionsAtCheckpoint(currentPosition, updatedProfile);
+      } else if (currentPosition > 20) {
+        // After position 20 (past cold start) - add 1 question
+        console.log(`[Feed] Past cold start (position ${currentPosition}), adding 1 question`);
         
-      // Take only questions we don't already have
-      const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 3);
-      
-      if (newQuestions.length > 0) {
-        console.log(`Appending ${newQuestions.length} personalized questions to feed`);
+        // Create a set of IDs that are already in our feed
+        const existingIds = new Set(currentFeed.map(item => item.id));
         
-        // Create a new feed with existing + new questions
-        const updatedFeed = [...currentFeed, ...newQuestions];
+        // Get questions that aren't already in our feed
+        const availableQuestions = feedData.filter(item => !existingIds.has(item.id));
         
-        // Add additional explanation about why we added them
-        const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+        // Use personalization logic to select new questions
+        const { items: personalizedItems, explanations: personalizedExplanations } = 
+          getPersonalizedFeed(availableQuestions, updatedProfile, 1); // Only get 1 question in normal state
+          
+        // Take only one question
+        const newQuestions = personalizedItems.filter(item => !existingIds.has(item.id)).slice(0, 1);
         
-        // Add the explanations from the personalization system plus our continuity message
-        newQuestions.forEach((item: FeedItemType) => {
-          combinedExplanations[item.id] = [
-            ...(personalizedExplanations[item.id] || []),
-            `Added to maintain feed continuity`
-          ];
-        });
-        
-        // Update the feed in Redux with the combined feed (old + new questions)
-        // This ensures the current question and its state remain in place
-        dispatch(setPersonalizedFeed({
-          items: updatedFeed,
-          explanations: combinedExplanations,
-          userId: user?.id // Pass userId to allow Redux to handle synchronization
-        }));
+        if (newQuestions.length > 0) {
+          console.log(`[Feed] Appending 1 personalized question after interaction`);
+          
+          // Create a new feed with existing + new questions
+          const updatedFeed = [...currentFeed, ...newQuestions];
+          
+          // Add additional explanation about why we added them
+          const combinedExplanations: Record<string, string[]> = { ...feedExplanations };
+          
+          // Add the explanations from the personalization system
+          newQuestions.forEach((item: FeedItemType) => {
+            combinedExplanations[item.id] = [
+              ...(personalizedExplanations[item.id] || []),
+              `Added after question interaction`
+            ];
+          });
+          
+          // Update the feed in Redux
+          dispatch(setPersonalizedFeed({
+            items: updatedFeed,
+            explanations: combinedExplanations,
+            userId: user?.id || undefined // Handle nullable user
+          }));
+        }
+      } else {
+        console.log(`[Feed] Not at a checkpoint position (${currentPosition}), not adding questions`);
       }
     }
     
@@ -1397,7 +1903,7 @@ const FeedScreen: React.FC = () => {
       trackQuestionInteraction(
         user.id, 
         questionId, 
-        questionItem.category || 'Unknown',
+        questionItem.topic || 'Unknown',
         // Handle optional properties safely
         (questionItem as any).subtopic || undefined,
         (questionItem as any).branch || undefined,
@@ -1408,7 +1914,7 @@ const FeedScreen: React.FC = () => {
       // Log the client-side data being tracked
       console.log('[FEED] Tracked client-side interaction data:', {
         questionId,
-        topic: questionItem.category || 'Unknown',
+        topic: questionItem.topic || 'Unknown',
         subtopic: (questionItem as any).subtopic || undefined,
         branch: (questionItem as any).branch || undefined,
         tags: questionItem.tags || [],
@@ -1607,7 +2113,7 @@ const FeedScreen: React.FC = () => {
         const { data, error } = await supabase
           .from('user_profiles')
           .select('avatar_url')
-          .eq('id', user.id)
+          .eq('id', user?.id)
           .single();
         
         if (error) {

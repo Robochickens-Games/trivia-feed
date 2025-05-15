@@ -31,6 +31,7 @@ import { colors } from '../../theme';
 import Button from '../../components/ui/Button';
 import ThemeToggle from '@/src/components/ThemeToggle';
 import { useTheme } from '@/src/context/ThemeContext';
+import { useAppSelector } from '../../store/hooks';
 
 // Add interface for countries
 interface Country {
@@ -39,9 +40,9 @@ interface Country {
 }
 
 const ProfileView: React.FC = () => {
-  const { user, signOut, updateProfile, isLoading: authLoading, isGuest } = useAuth();
-  const [username, setUsername] = useState('');
+  const { user, signOut, updateProfile, isLoading: authLoading, isGuest, resendConfirmationEmail } = useAuth();
   const [fullName, setFullName] = useState('');
+  const [username, setUsername] = useState('');
   const [avatarUrl, setAvatarUrl] = useState('');
   const [country, setCountry] = useState('');
   const [isEditing, setIsEditing] = useState(false);
@@ -55,6 +56,11 @@ const ProfileView: React.FC = () => {
   const [localIsGuest, setLocalIsGuest] = useState(false);
   const [formChanged, setFormChanged] = useState(false);
   const { currentTheme, themeDefinition } = useTheme();
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [emailForConfirmation, setEmailForConfirmation] = useState('');
+  
+  // Get user profile data from Redux store
+  const userProfile = useAppSelector(state => state.trivia.userProfile);
   
   // Tooltip state
   const [showScrollTooltip, setShowScrollTooltip] = useState(false);
@@ -161,11 +167,33 @@ const ProfileView: React.FC = () => {
   }, [username, fullName, avatarUrl, country, profileData]);
 
   const fetchUserProfile = async () => {
+    // MODIFIED: No longer fetch directly from database
+    // User profile data should already be available from SimplifiedSyncManager
+    console.log('ProfileView - Avoiding direct database access, using SimplifiedSyncManager data instead');
+    
     if (!user) return;
     
     try {
       setLoadingProfile(true);
       
+      // Import the functions we need
+      const { fetchProfileWithDefaultCheck, hasAllDefaultWeights } = await import('../../lib/simplifiedSyncService');
+      
+      // Check if profile has default weights
+      if (hasAllDefaultWeights(userProfile)) {
+        console.log('ProfileView - Detected default weights, attempting to fetch from database');
+        
+        // Get from database directly, bypassing write-only mode
+        const profile = await fetchProfileWithDefaultCheck(user.id, userProfile);
+        
+        if (profile) {
+          console.log('ProfileView - Successfully fetched profile from database');
+          // Handle the Redux update in the SimplifiedSyncManager
+        }
+      }
+      
+      // Fetch user display data from database anyway - this is separate from the topics/weights
+      console.log('ProfileView - Fetching user display data from profiles table');
       const { data, error } = await supabase
         .from('user_profiles')
         .select('*')
@@ -178,10 +206,11 @@ const ProfileView: React.FC = () => {
       
       if (data) {
         setProfileData(data);
-        setUsername(data.username || '');
         setFullName(data.full_name || '');
         setAvatarUrl(data.avatar_url || '');
         setCountry(data.country || '');
+      } else {
+        console.log('ProfileView - No display data found');
       }
     } catch (error: any) {
       console.error('Error fetching user profile:', error.message);
@@ -196,7 +225,6 @@ const ProfileView: React.FC = () => {
       setIsUpdating(true);
       
       await updateProfile({
-        username,
         fullName,
         avatarUrl,
         country
@@ -290,10 +318,7 @@ const ProfileView: React.FC = () => {
   // Generate initials for the avatar placeholder
   const getInitials = () => {
     if (fullName) {
-      return fullName.split(' ').map(name => name[0]).join('').toUpperCase();
-    }
-    if (username) {
-      return username.substring(0, 2).toUpperCase();
+      return fullName.substring(0, 2).toUpperCase();
     }
     if (user?.email) {
       return user.email.substring(0, 2).toUpperCase();
@@ -710,8 +735,10 @@ const ProfileView: React.FC = () => {
       padding: 20,
     },
     emptyText: {
-      fontSize: 16,
+      fontSize: 18,
       textAlign: 'center',
+      marginBottom: 20,
+      fontWeight: '500',
     },
     userInfoSection: {
       alignItems: 'center',
@@ -732,6 +759,24 @@ const ProfileView: React.FC = () => {
       color: 'white',
       fontSize: 36,
       fontWeight: 'bold',
+    },
+    avatarImage: {
+      width: 100,
+      height: 100,
+      borderRadius: 50,
+    },
+    editAvatarButton: {
+      position: 'absolute',
+      bottom: 0,
+      right: 0,
+      backgroundColor: '#0a7ea4',
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      justifyContent: 'center',
+      alignItems: 'center',
+      borderWidth: 2,
+      borderColor: isDark ? '#1c1c1c' : 'white',
     },
     emailText: {
       fontSize: 16,
@@ -777,48 +822,90 @@ const ProfileView: React.FC = () => {
       opacity: 0.7,
     },
     input: {
-      paddingVertical: 12,
-      paddingHorizontal: 15,
+      borderWidth: 1,
+      borderColor: 'rgba(150, 150, 150, 0.3)',
       borderRadius: 8,
+      padding: 12,
       fontSize: 16,
-      borderWidth: 1,
-      borderColor: 'rgba(150, 150, 150, 0.2)',
       color: isDark ? 'white' : 'black',
-      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.8)' : 'rgba(255, 255, 255, 0.8)',
     },
-    countryPickerButton: {
-      paddingVertical: 12,
-      paddingHorizontal: 15,
-      borderRadius: 8,
-      borderWidth: 1,
-      borderColor: 'rgba(150, 150, 150, 0.2)',
+    buttonContainer: {
+      marginTop: 20,
       flexDirection: 'row',
       justifyContent: 'space-between',
-      alignItems: 'center',
-      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.8)' : 'rgba(255, 255, 255, 0.8)',
     },
-    countryPickerButtonText: {
-      fontSize: 16,
-      color: isDark ? 'white' : 'black',
-    },
-    accountSection: {
-      marginTop: 20,
-    },
-    accountSectionTitle: {
-      fontSize: 18,
-      fontWeight: 'bold',
-      marginBottom: 15,
-    },
-    signOutButton: {
-      backgroundColor: '#ff3b30',
-      paddingVertical: 12,
+    saveButton: {
+      flex: 1,
+      backgroundColor: '#0a7ea4',
+      padding: 12,
       borderRadius: 8,
       alignItems: 'center',
+      marginRight: 8,
     },
-    signOutButtonText: {
+    saveButtonText: {
       color: 'white',
       fontSize: 16,
       fontWeight: '500',
+    },
+    cancelButton: {
+      flex: 1,
+      backgroundColor: 'rgba(150, 150, 150, 0.2)',
+      padding: 12,
+      borderRadius: 8,
+      alignItems: 'center',
+      marginLeft: 8,
+    },
+    cancelButtonText: {
+      fontSize: 16,
+      fontWeight: '500',
+    },
+    pickerContainer: {
+      borderWidth: 1,
+      borderColor: 'rgba(150, 150, 150, 0.3)',
+      borderRadius: 8,
+      overflow: 'hidden',
+    },
+    pickerWeb: {
+      borderWidth: 1,
+      borderColor: 'rgba(150, 150, 150, 0.3)',
+      borderRadius: 8,
+      padding: 12,
+      width: '100%',
+      backgroundColor: 'transparent',
+    },
+    pickerIOS: {
+      width: '100%',
+    },
+    pickerModalContent: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      borderTopLeftRadius: 15,
+      borderTopRightRadius: 15,
+      paddingBottom: 20,
+    },
+    pickerHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 15,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: 'rgba(150, 150, 150, 0.2)',
+    },
+    pickerTitle: {
+      fontSize: 16,
+      fontWeight: 'bold',
+    },
+    pickerCancel: {
+      fontSize: 16,
+      color: 'red',
+    },
+    pickerDone: {
+      fontSize: 16,
+      color: 'blue',
+      fontWeight: 'bold',
     },
     modalContainer: {
       position: 'absolute',
@@ -826,17 +913,8 @@ const ProfileView: React.FC = () => {
       left: 0,
       right: 0,
       bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      justifyContent: 'flex-end',
-      zIndex: 1000,
-    },
-    pickerModalContent: {
-      borderTopLeftRadius: 15,
-      borderTopRightRadius: 15,
-    },
-    pickerHeader: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      justifyContent: 'center',
       alignItems: 'center',
       padding: 15,
       borderBottomWidth: 1,
@@ -954,46 +1032,40 @@ const ProfileView: React.FC = () => {
     },
     editAvatarButton: {
       position: 'absolute',
-      right: 0,
-      bottom: 0,
-      backgroundColor: currentTheme === 'neon' ? '#FFFF00' : getThemeColor('primary'),
+      top: 0,
+      left: 0,
+      backgroundColor: 'rgba(0, 0, 0, 0.4)',
       width: 36,
       height: 36,
       borderRadius: 18,
       justifyContent: 'center',
       alignItems: 'center',
       borderWidth: 3,
-      borderColor: isDark ? '#1c1c1c' : '#ffffff',
-    },
-    avatarImage: {
-      width: 100,
-      height: 100,
-      borderRadius: 50,
+      borderColor: isDark ? '#ffffff' : '#000',
     },
     guestModeContainer: {
-      alignItems: 'center',
+      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.7)' : 'rgba(245, 245, 245, 0.9)',
       padding: 20,
-      borderRadius: 12,
+      borderRadius: 10,
+      alignItems: 'center',
       width: '100%',
-      maxWidth: 500,
-      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.8)' : 'rgba(255, 255, 255, 0.8)',
-      borderWidth: 1,
-      borderColor: 'rgba(150, 150, 150, 0.2)',
+      maxWidth: 400,
     },
     guestModeTitle: {
-      fontSize: 24,
+      fontSize: 22,
       fontWeight: 'bold',
       marginBottom: 12,
       color: currentTheme === 'neon' ? '#FFFF00' : '#ffc107',
     },
     guestModeMessage: {
       fontSize: 16,
-      marginBottom: 20,
+      marginBottom: 16,
       textAlign: 'center',
+      opacity: 0.8,
     },
     guestModeBenefits: {
       alignSelf: 'stretch',
-      marginBottom: 20,
+      marginBottom: 24,
     },
     benefitRow: {
       flexDirection: 'row',
@@ -1001,7 +1073,118 @@ const ProfileView: React.FC = () => {
       marginBottom: 10,
     },
     benefitText: {
+      fontSize: 15,
+    },
+    accountSection: {
+      marginTop: 20,
+      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.7)' : 'rgba(245, 245, 245, 0.9)',
+      padding: 16,
+      borderRadius: 10,
+    },
+    accountSectionTitle: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      marginBottom: 16,
+      textAlign: 'center',
+    },
+    // New styles for the sign-in/confirmation email screen
+    actionButtonsContainer: {
+      width: '100%',
+      maxWidth: 350,
+      marginTop: 24,
+      padding: 16,
+    },
+    divider: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginVertical: 20,
+    },
+    dividerLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
+    },
+    dividerText: {
+      marginHorizontal: 10,
+      fontSize: 14,
+      fontWeight: '600',
+      color: isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.6)',
+    },
+    signInButton: {
+      marginBottom: 8,
+      backgroundColor: '#3498db',
+    },
+    resendEmailButton: {
+      marginBottom: 8,
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)',
+    },
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0, 0, 0, 0.6)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    modalContent: {
+      width: '90%',
+      maxWidth: 400,
+      backgroundColor: isDark ? '#222' : '#FFF',
+      borderRadius: 12,
+      padding: 24,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25,
+      shadowRadius: 3.84,
+      elevation: 5,
+    },
+    modalTitle: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      marginBottom: 16,
+      textAlign: 'center',
+    },
+    modalDescription: {
+      fontSize: 14,
+      marginBottom: 16,
+      textAlign: 'center',
+      color: isDark ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.7)',
+    },
+    modalInput: {
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
+      borderRadius: 8,
+      padding: 12,
+      marginBottom: 24,
       fontSize: 16,
+      color: isDark ? '#FFFFFF' : '#000000',
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)',
+    },
+    modalButtons: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+    },
+    modalButton: {
+      flex: 1,
+      padding: 12,
+      borderRadius: 8,
+      alignItems: 'center',
+    },
+    modalCancelButton: {
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+      marginRight: 8,
+    },
+    modalCancelText: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: isDark ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.7)',
+    },
+    sendButton: {
+      backgroundColor: '#3498db',
+      marginLeft: 8,
+    },
+    sendButtonText: {
+      color: '#FFFFFF',
+      fontSize: 16,
+      fontWeight: '600',
     },
     themeToggleContainer: {
       marginTop: 20,
@@ -1100,7 +1283,24 @@ const ProfileView: React.FC = () => {
             variant="accent"
             size={getButtonSize()}
             fullWidth
-            leftIcon={<FeatherIcon name="log-in" size={18} color="#000" style={{ marginRight: 8 }} />}
+            leftIcon={<FeatherIcon name="user-plus" size={18} color="#000" style={{ marginRight: 8 }} />}
+            onPress={() => {
+              // Navigate to signup screen
+              if (Platform.OS === 'web') {
+                window.location.href = '/auth/signup?direct=true';
+              } else {
+                // Use Expo Router for iOS/Android navigation
+                router.push({
+                  pathname: '/auth/signup',
+                  params: { direct: 'true' }
+                });
+              }
+            }}
+          >
+            Sign Up
+          </Button>
+          
+          <TouchableOpacity
             onPress={() => {
               router.push({
                 pathname: '/auth/login',
@@ -1109,8 +1309,10 @@ const ProfileView: React.FC = () => {
             }}
             style={applyWebButtonStyle()}
           >
-            Sign In
-          </Button>
+            <ThemedText style={{ color: '#3498db', fontSize: 14 }}>
+              Already have an account? Sign in here
+            </ThemedText>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -1172,7 +1374,24 @@ const ProfileView: React.FC = () => {
               variant="accent"
               size={getButtonSize()}
               fullWidth
-              leftIcon={<FeatherIcon name="log-in" size={18} color="#000" style={{ marginRight: 8 }} />}
+              leftIcon={<FeatherIcon name="user-plus" size={18} color="#000" style={{ marginRight: 8 }} />}
+              onPress={() => {
+                // Navigate to signup screen
+                if (Platform.OS === 'web') {
+                  window.location.href = '/auth/signup?direct=true';
+                } else {
+                  // Use Expo Router for iOS/Android navigation
+                  router.push({
+                    pathname: '/auth/signup',
+                    params: { direct: 'true' }
+                  });
+                }
+              }}
+            >
+              Sign Up
+            </Button>
+            
+            <TouchableOpacity
               onPress={() => {
                 router.push({
                   pathname: '/auth/login',
@@ -1181,8 +1400,10 @@ const ProfileView: React.FC = () => {
               }}
               style={applyWebButtonStyle()}
             >
-              Sign In
-            </Button>
+              <ThemedText style={{ color: '#3498db', fontSize: 14 }}>
+                Already have an account? Sign in here
+              </ThemedText>
+            </TouchableOpacity>
           </View>
         </View>
       );
@@ -1194,6 +1415,110 @@ const ProfileView: React.FC = () => {
         <ThemedText style={profileStyles.emptyText}>
           You need to sign in to view your profile
         </ThemedText>
+        
+        {/* Add buttons for sign in and resend confirmation */}
+        <View style={profileStyles.actionButtonsContainer}>
+          <Button
+            variant="primary"
+            fullWidth
+            leftIcon={<FeatherIcon name="log-in" size={18} color="#fff" style={{ marginRight: 8 }} />}
+            onPress={() => {
+              // Navigate to login screen
+              if (Platform.OS === 'web') {
+                window.location.href = '/auth/login?direct=true';
+              } else {
+                router.push({
+                  pathname: '/auth/login',
+                  params: { direct: 'true' }
+                });
+              }
+            }}
+            style={profileStyles.signInButton}
+          >
+            Sign In
+          </Button>
+          
+          <View style={profileStyles.divider}>
+            <View style={profileStyles.dividerLine} />
+            <ThemedText style={profileStyles.dividerText}>OR</ThemedText>
+            <View style={profileStyles.dividerLine} />
+          </View>
+          
+          <Button
+            variant="secondary"
+            fullWidth
+            leftIcon={<FeatherIcon name="mail" size={18} color="#333" style={{ marginRight: 8 }} />}
+            onPress={() => setShowEmailModal(true)}
+            style={profileStyles.resendEmailButton}
+          >
+            Resend Confirmation Email
+          </Button>
+          
+          <TouchableOpacity 
+            onPress={() => {
+              // Navigate to signup screen
+              if (Platform.OS === 'web') {
+                window.location.href = '/auth/signup?direct=true';
+              } else {
+                router.push({
+                  pathname: '/auth/signup',
+                  params: { direct: 'true' }
+                });
+              }
+            }}
+            style={{ marginTop: 16, alignItems: 'center' }}
+          >
+            <ThemedText style={{ color: '#3498db', fontSize: 14 }}>
+              Don't have an account? Sign up here
+            </ThemedText>
+          </TouchableOpacity>
+        </View>
+        
+        {/* Email confirmation modal */}
+        <Modal
+          visible={showEmailModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setShowEmailModal(false)}
+        >
+          <View style={profileStyles.modalOverlay}>
+            <View style={profileStyles.modalContent}>
+              <ThemedText style={profileStyles.modalTitle}>Resend Confirmation Email</ThemedText>
+              <ThemedText style={profileStyles.modalDescription}>
+                Enter your email address to receive a new confirmation link:
+              </ThemedText>
+              
+              <TextInput
+                style={profileStyles.modalInput}
+                value={emailForConfirmation}
+                onChangeText={setEmailForConfirmation}
+                placeholder="Your email address"
+                placeholderTextColor={isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'}
+                keyboardType="email-address"
+                autoCapitalize="none"
+              />
+              
+              <View style={profileStyles.modalButtons}>
+                <TouchableOpacity 
+                  style={[profileStyles.modalButton, profileStyles.modalCancelButton]}
+                  onPress={() => {
+                    setShowEmailModal(false);
+                    setEmailForConfirmation('');
+                  }}
+                >
+                  <ThemedText style={profileStyles.modalCancelText}>Cancel</ThemedText>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={[profileStyles.modalButton, profileStyles.sendButton]}
+                  onPress={handleResendConfirmation}
+                >
+                  <ThemedText style={profileStyles.sendButtonText}>Send</ThemedText>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -1253,13 +1578,17 @@ const ProfileView: React.FC = () => {
         {!isEditing && !avatarUrl && (
           <TouchableOpacity 
             onPress={() => setIsEditing(true)}
-            style={profileStyles.addPhotoHint}
+            style={{ 
+              flexDirection: 'row', 
+              alignItems: 'center',
+              marginBottom: 10,
+              backgroundColor: 'rgba(10, 126, 164, 0.1)',
+              paddingVertical: 6,
+              paddingHorizontal: 12,
+              borderRadius: 20
+            }}
           >
-            <FeatherIcon 
-              name="camera" 
-              size={14} 
-              color={currentTheme === 'neon' ? '#FFFF00' : getThemeColor('primary')} 
-            />
+            <FeatherIcon name="camera" size={14} color={currentTheme === 'neon' ? '#FFFF00' : getThemeColor('primary')} />
             <ThemedText style={profileStyles.addPhotoText}>Add a profile photo</ThemedText>
           </TouchableOpacity>
         )}
@@ -1304,12 +1633,7 @@ const ProfileView: React.FC = () => {
           {/* User details section */}
           <View style={profileStyles.detailsSection}>
             <View style={profileStyles.detailRow}>
-              <ThemedText style={profileStyles.detailLabel}>Username</ThemedText>
-              <ThemedText style={profileStyles.detailValue}>{username || 'Not set'}</ThemedText>
-            </View>
-            
-            <View style={profileStyles.detailRow}>
-              <ThemedText style={profileStyles.detailLabel}>Full Name</ThemedText>
+              <ThemedText style={profileStyles.detailLabel}>Name</ThemedText>
               <ThemedText style={profileStyles.detailValue}>{fullName || 'Not set'}</ThemedText>
             </View>
             
@@ -1366,85 +1690,37 @@ const ProfileView: React.FC = () => {
         <View style={profileStyles.formContainer}>
           {/* Edit form */}
           <View style={profileStyles.inputContainer}>
-            <ThemedText style={profileStyles.inputLabel}>Username</ThemedText>
+            <ThemedText style={profileStyles.inputLabel}>Name</ThemedText>
             <TextInput
-              style={profileStyles.input}
-              value={username}
-              onChangeText={setUsername}
-              placeholder="Enter username"
-              placeholderTextColor={isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.6)'}
-            />
-          </View>
-          
-          <View style={profileStyles.inputContainer}>
-            <ThemedText style={profileStyles.inputLabel}>Full Name</ThemedText>
-            <TextInput
-              style={profileStyles.input}
+              style={[profileStyles.input, isDark && { borderColor: 'rgba(255, 255, 255, 0.2)' }]}
               value={fullName}
               onChangeText={setFullName}
-              placeholder="Enter full name"
-              placeholderTextColor={isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.6)'}
+              placeholder="Enter your name"
+              placeholderTextColor={isDark ? '#aaa' : '#666'}
             />
-          </View>
-          
-          <View style={profileStyles.inputContainer}>
-            <ThemedText style={profileStyles.inputLabel}>Profile Picture</ThemedText>
-            <View style={profileStyles.avatarTipContainer}>
-              <FeatherIcon 
-                name="info" 
-                size={16} 
-                color={currentTheme === 'neon' ? '#FFFF00' : getThemeColor('info')} 
-              />
-              <ThemedText style={profileStyles.avatarTip}>
-                Upload a profile picture to personalize your account
-              </ThemedText>
-            </View>
-            <View style={[
-              profileStyles.avatarButtonsContainer, 
-              Platform.OS !== 'web' && { flexDirection: 'column' as const },
-              Platform.OS === 'web' && { maxWidth: 400, alignSelf: 'center' as const }
-            ]}>
-              <Button
-                variant="primary"
-                size={getButtonSize()}
-                style={applyWebButtonStyle(
-                  { marginBottom: Platform.OS !== 'web' ? 10 : 0 }
-                )}
-                leftIcon={<FeatherIcon name="upload" size={16} color="#fff" />}
-                onPress={pickImage}
-                disabled={uploadingImage}
-              >
-                {uploadingImage ? 'Uploading...' : 'Upload Image'}
-              </Button>
-              
-              {avatarUrl ? (
-                <Button
-                  variant="destructive"
-                  size={getButtonSize()}
-                  style={applyWebButtonStyle(
-                    Platform.OS === 'web' ? { marginLeft: 5 } : null
-                  )}
-                  leftIcon={<FeatherIcon name="trash-2" size={16} color="#fff" />}
-                  onPress={removeAvatar}
-                  disabled={uploadingImage}
-                >
-                  Remove
-                </Button>
-              ) : null}
-            </View>
           </View>
           
           <View style={profileStyles.inputContainer}>
             <ThemedText style={profileStyles.inputLabel}>Country</ThemedText>
             {Platform.OS === 'ios' ? (
               <TouchableOpacity
-                style={profileStyles.countryPickerButton}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 15,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: 'rgba(150, 150, 150, 0.2)',
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  backgroundColor: isDark ? 'rgba(30, 30, 30, 0.8)' : 'rgba(255, 255, 255, 0.8)'
+                }}
                 onPress={() => setShowCountryPicker(true)}
               >
-                <ThemedText style={profileStyles.countryPickerButtonText}>
-                  {getCountryName(country)}
+                <ThemedText style={{ fontSize: 16, color: isDark ? 'white' : 'black' }}>
+                  {country ? getCountryName(country) : 'Select a country'}
                 </ThemedText>
-                <FeatherIcon name="chevron-down" size={20} color={isDark ? 'white' : 'black'} />
+                <FeatherIcon name="chevron-down" size={20} color={isDark ? '#ccc' : '#666'} />
               </TouchableOpacity>
             ) : (
               <View style={[
@@ -1466,11 +1742,11 @@ const ProfileView: React.FC = () => {
             )}
           </View>
           
-          <View style={[
-            profileStyles.buttonRow,
-            Platform.OS !== 'web' && { flexDirection: 'column' as const },
-            Platform.OS === 'web' && { maxWidth: 400, alignSelf: 'center' as const, width: '100%' }
-          ]}>
+          <View style={{ 
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            marginTop: 20
+          }}>
             <Button 
               variant={!formChanged ? "primary" : "outline"}
               size={getButtonSize()}
@@ -1479,7 +1755,6 @@ const ProfileView: React.FC = () => {
                 setIsEditing(false);
                 // Reset to original values
                 if (profileData) {
-                  setUsername(profileData.username || '');
                   setFullName(profileData.full_name || '');
                   setAvatarUrl(profileData.avatar_url || '');
                   setCountry(profileData.country || '');

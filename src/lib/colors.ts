@@ -1,5 +1,9 @@
-// A mapping of each category/topic to a specific background color
-export const categoryColors: Record<string, string> = {
+// Import category colors from NeonColors for consistency
+import { NeonCategoryColors, getCategoryColor as getNeonColor } from '@/constants/NeonColors';
+import { useTheme } from '@/src/context/ThemeContext';
+
+// A mapping of each topic to a specific background color
+export const topicColors: Record<string, string> = {
   // Main categories - full spectrum
   'Music': '#6200EA',           // Deep Purple
   'Entertainment': '#FF4081',   // Pink
@@ -37,52 +41,51 @@ export const categoryColors: Record<string, string> = {
   'Modern Cinema': '#C51162',   // Pink
   'Mythology': '#AA00FF',       // Purple
   'Animals': '#76FF03',         // Light Green
-  
-  // Additional categories
-  'Science Fiction': '#009688', // Teal
-  'Video Games': '#AA00FF',     // Purple
-  'Anime & Manga': '#E040FB',   // Light Purple
-  'Architecture': '#FFB300',    // Amber
-  'Business & Economics': '#00C853', // Green
-  'Health & Medicine': '#D50000', // Red
-  'Religion': '#3D5AFE',        // Indigo
-  'Fashion': '#F50057',         // Pink
-  'Transportation': '#2979FF',  // Blue
-  'Space & Astronomy': '#6200EA', // Deep Purple
-  'Comics & Superheroes': '#FF1744', // Red
-  'Board Games': '#00E676',     // Green
+  'Movies': '#673AB7',          // Deep Purple
   
   // Default fallback color
   'default': '#455A64'          // Blue Grey
 };
 
-// Import category colors from NeonColors for consistency
-import { NeonCategoryColors, getCategoryColor as getNeonColor } from '@/constants/NeonColors';
+// For backward compatibility
+export const categoryColors = topicColors;
 
-// Function to get a color based on category
-export function getCategoryColor(category: string, isNeonTheme = false): string {
+// Function to get a color for a given topic
+export function getTopicColor(category: string): string {
+  // Try direct match first (case insensitive)
+  const lowerCategory = category.toLowerCase();
+  
+  // Exact match (case-insensitive)
+  if (topicColors[category]) {
+    return topicColors[category];
+  }
+  
+  // Try partial match (if "History" isn't found, but "American History" is provided, use History's color)
+  const partialMatch = Object.keys(topicColors).find(key => 
+    lowerCategory.includes(key.toLowerCase()) || key.toLowerCase().includes(lowerCategory)
+  );
+  
+  if (partialMatch) {
+    console.log(`Using color for "${partialMatch}" as a match for "${category}"`);
+    return topicColors[partialMatch];
+  }
+  
+  // Default fallback color
+  return topicColors.default;
+}
+
+// Function to get a color with neon theme support
+export function getTopicColorWithTheme(category: string, isNeonTheme = false): string {
   // If in neon theme, use the hex color from neon category colors
   if (isNeonTheme) {
     // Use the helper function from NeonColors
     return getNeonColor(category).hex;
   }
   
-  // For standard theme, use the original colors
-  // Try to get direct match
-  if (categoryColors[category]) {
-    return categoryColors[category];
-  }
-  
-  // Try to find a partial match
-  const partialMatch = Object.keys(categoryColors).find(key => 
-    category.toLowerCase().includes(key.toLowerCase()) || 
-    key.toLowerCase().includes(category.toLowerCase())
-  );
-  
-  if (partialMatch) {
-    return categoryColors[partialMatch];
-  }
-  
-  // Return default color if no match found
-  return categoryColors.default;
-} 
+  // For standard theme, use the standard topic colors
+  return getTopicColor(category);
+}
+
+// Export old function names for backward compatibility
+export const getCategoryColor = getTopicColor;
+export const getCategoryColorWithTheme = getTopicColorWithTheme; 

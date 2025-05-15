@@ -1,11 +1,10 @@
 import React, { createContext, useState, useContext, useEffect, ReactNode } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import { Session, User, AuthChangeEvent } from '@supabase/supabase-js';
-import { Alert } from 'react-native';
+import { Alert , Platform } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 
 // Define the shape of our auth context
 type AuthContextType = {
@@ -22,6 +21,8 @@ type AuthContextType = {
   resetPassword: (email: string) => Promise<void>;
   updateProfile: (userData: { username?: string; fullName?: string; avatarUrl?: string; country?: string }) => Promise<void>;
   continueAsGuest: () => Promise<void>;
+  resendConfirmationEmail: (email: string) => Promise<void>;
+  forceRefreshAppState: () => Promise<void>;
 };
 
 // Create the context with a default value
@@ -81,10 +82,30 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: AuthChangeEvent, newSession: Session | null) => {
       console.log('Auth state changed:', _event, newSession ? 'New session' : 'No session');
       
+      // Add more debug information for auth diagnostics
+      if (newSession) {
+        console.log('Session details:', {
+          userId: newSession.user.id,
+          email: newSession.user.email,
+          emailConfirmed: newSession.user.email_confirmed_at ? 'Yes' : 'No',
+          aud: newSession.user.aud,
+          expiresAt: new Date(newSession.expires_at! * 1000).toISOString()
+        });
+      }
+      
       // If user logs in, clear guest mode
       if (newSession) {
         console.log('User logged in, clearing guest mode');
+        
+        // Update all state together
         setIsGuest(false);
+        setSession(newSession);
+        
+        // Use type assertion to access user property
+        const user = newSession ? (newSession as any).user : null;
+        setUser(user);
+        
+        // Clear guest mode in AsyncStorage
         AsyncStorage.removeItem('guestMode')
           .then(() => console.log('Guest mode flag cleared'))
           .catch(err => console.error('Failed to clear guest mode flag:', err));
@@ -92,14 +113,24 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       // If user logs out, enable guest mode
       else if (_event === 'SIGNED_OUT') {
         console.log('User signed out, enabling guest mode');
+        
+        // Update all state together
         setIsGuest(true);
+        setUser(null);
+        setSession(null);
+        
         AsyncStorage.setItem('guestMode', 'true')
           .then(() => console.log('Guest mode flag set on sign out'))
           .catch(err => console.error('Failed to set guest mode flag on sign out:', err));
+      } else {
+        // For any other events, make sure we update the state
+        setSession(newSession);
+        
+        // Use type assertion to access user property
+        const user = newSession ? (newSession as any).user : null;
+        setUser(user);
       }
       
-      setSession(newSession);
-      setUser(newSession?.user ?? null);
       setIsLoading(false);
     });
 
@@ -109,34 +140,48 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
   }, []);
 
+  // Add a helper function to force refresh app state
+  const forceRefreshAppState = async () => {
+    // Force a small delay to ensure all state updates are processed
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    if (Platform.OS === 'web') {
+      // For web, we can do a hard refresh which is the most reliable way
+      window.location.reload();
+    } else {
+      // For native, we need to work with the state
+      // This is just a backup since we're already updating state 
+      // and redirecting the user
+      setIsLoading(true);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      setIsLoading(false);
+    }
+  };
+
   // Sign up with email and password
   const signUp = async (email: string, password: string) => {
     try {
       setIsLoading(true);
       console.log('Attempting sign up with email:', email);
       
-      // Check if user with this email already exists
-      const { data: existingUsers, error: checkError } = await supabase
-        .from('user_profiles')
-        .select('id')
-        .eq('username', email)
-        .maybeSingle();
-        
-      if (checkError) {
-        console.warn('Error checking for existing user:', checkError.message);
-      }
-      
-      if (existingUsers) {
-        console.log('User with this email already exists');
-        throw new Error('A user with this email already exists. Please try signing in instead.');
-      }
+      // Clear any previous guest mode when signing up
+      console.log('Clearing guest mode before sign up');
+      await AsyncStorage.removeItem('guestMode');
+      setIsGuest(false);
       
       // Proceed with sign up
+      console.log('Calling Supabase auth.signUp');
       const { data, error } = await supabase.auth.signUp({ 
         email, 
         password,
         options: {
-          emailRedirectTo: window.location.origin
+          // Configure email redirect to the auth callback handler for direct processing
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+          data: {
+            // Add some basic user metadata that might help with profile creation
+            email: email,
+            sign_up_date: new Date().toISOString()
+          }
         }
       });
       
@@ -155,20 +200,96 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         userConfirmed: data.user?.email_confirmed_at ? 'Yes' : 'No',
       });
       
+      // If we got this far, the auth signup worked - but the profile might not have been created
+      // Let's manually check and create it if needed 
+      if (data.user) {
+        try {
+          console.log('Attempting to manually check and create user profile if needed');
+          
+          // First check if the profile exists
+          const { data: profileData, error: profileError } = await supabase
+            .from('user_profiles')
+            .select('id')
+            .eq('id', data.user.id)
+            .single();
+          
+          if (profileError && !profileData) {
+            console.log('Profile does not exist, attempting to create manually');
+            
+            // Extract first two letters from email for the name
+            const emailFirstTwoLetters = email.substring(0, 2).toUpperCase();
+            
+            // Try to create the profile manually
+            const { error: insertError } = await supabase
+              .from('user_profiles')
+              .insert({
+                id: data.user.id,
+                full_name: emailFirstTwoLetters,
+                country: 'OT', // "Other" country code
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+              });
+            
+            if (insertError) {
+              console.error('Failed to manually create profile:', insertError);
+              // Continue anyway - we'll show a message to the user
+            } else {
+              console.log('Successfully created user profile manually');
+            }
+          } else {
+            console.log('Profile already exists');
+          }
+        } catch (profileError) {
+          console.error('Error handling profile creation:', profileError);
+          // Continue with auth flow even if profile creation failed
+        }
+      }
+      
       if (!data.session) {
         // Email confirmation is required
         console.log('Email confirmation required for new user');
         Alert.alert(
           'Confirmation Email Sent',
-          'Please check your email and click the confirmation link to complete your registration. Check your spam folder if you don\'t see it.',
+          'Please check your email and click the confirmation link to complete your registration. You will be automatically signed in after confirming your email address.',
           [{ text: 'OK', onPress: () => console.log('Email confirmation alert closed') }]
         );
       } else {
         // User was created and auto-confirmed
         console.log('User created and auto-confirmed (no email verification needed)');
+        
+        // Force immediate state update to ensure UI reflects the signed-in state
         setSession(data.session);
         setUser(data.user);
-        Alert.alert('Account Created', 'Your account has been created successfully.');
+        setIsGuest(false);
+        setIsLoading(false);
+        
+        // Ensure guest mode is cleared in storage
+        await AsyncStorage.removeItem('guestMode');
+        
+        // Navigation after successful signup
+        Alert.alert(
+          'Account Created', 
+          'Your account has been created successfully.',
+          [{ 
+            text: 'OK', 
+            onPress: async () => {
+              console.log('Navigating to home after successful signup');
+              
+              // Force state refresh before navigation
+              await forceRefreshAppState();
+              
+              // Use appropriate navigation based on platform
+              if (Platform.OS === 'web') {
+                // Force a full page reload to ensure all components re-render with new auth state
+                window.location.href = '/';
+              } else {
+                // Import router to navigate
+                const { router } = require('expo-router');
+                router.replace('/');
+              }
+            }
+          }]
+        );
       }
     } catch (error: any) {
       console.error('Sign up error:', error.message);
@@ -176,6 +297,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       let errorMessage = error.message;
       if (error.message.includes('already registered')) {
         errorMessage = 'This email is already registered. Please sign in instead.';
+      } else if (error.message.includes('Database error') || error.status === 500) {
+        errorMessage = 'There was a problem creating your account. Please try again or contact support if the problem persists.';
       }
       
       Alert.alert('Sign Up Failed', errorMessage);
@@ -307,6 +430,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         userSet: data.user?.id,
         sessionSet: data.session?.access_token ? 'Present' : 'Missing'
       });
+      
+      // Force app state refresh
+      await forceRefreshAppState();
       
       return true;
     } catch (error: any) {
@@ -486,7 +612,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const { error } = await supabase
         .from('user_profiles')
         .update({
-          username: userData.username,
           full_name: userData.fullName,
           avatar_url: userData.avatarUrl,
           country: userData.country,
@@ -558,6 +683,51 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
+  // Add a new function to resend confirmation email
+  const resendConfirmationEmail = async (email: string) => {
+    try {
+      setIsLoading(true);
+      console.log('Attempting to resend confirmation email to:', email);
+      
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: email,
+        options: {
+          // Use the dedicated auth callback handler for more robust processing
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+        }
+      });
+      
+      if (error) {
+        console.error('Failed to resend confirmation email:', error);
+        
+        // Handle rate limiting errors specifically
+        if (error.message.includes('after')) {
+          Alert.alert(
+            'Too Many Requests',
+            'Please wait a minute before requesting another confirmation email.',
+            [{ text: 'OK' }]
+          );
+        } else {
+          Alert.alert('Error', error.message);
+        }
+        throw error;
+      }
+      
+      console.log('Confirmation email resent successfully');
+      Alert.alert(
+        'Confirmation Email Sent',
+        'Please check your email and click the confirmation link to complete your registration. You will be automatically signed in after confirming.',
+        [{ text: 'OK' }]
+      );
+    } catch (error: any) {
+      console.error('Error resending confirmation email:', error.message);
+      // The error alert is already handled above
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Provide the auth context to children components
   return (
     <AuthContext.Provider
@@ -574,7 +744,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         signInWithApple,
         resetPassword,
         updateProfile,
-        continueAsGuest
+        continueAsGuest,
+        resendConfirmationEmail,
+        forceRefreshAppState
       }}
     >
       {children}

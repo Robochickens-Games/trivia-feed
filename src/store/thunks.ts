@@ -11,7 +11,9 @@ export const loadUserDataThunk = (userId: string) => async (dispatch: AppDispatc
     // Start loading process
     dispatch(loadUserDataStart({ userId }));
     
-    // Load all user data
+    console.log('Loading user data with weight-related operations disabled.');
+    
+    // Load all user data (note: syncService has been modified to not fetch weight data)
     const userData = await loadUserData(userId);
     
     // Successfully loaded data
