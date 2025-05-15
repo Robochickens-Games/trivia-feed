@@ -1059,6 +1059,247 @@ try {
 
 For production, the API key is never exposed to clients. Instead, the app uses Supabase Edge Functions to securely make API calls server-side.
 
+### Question Generation Algorithm Logic
+
+The system uses a sophisticated algorithm to select topics and create personalized prompts for generating trivia questions. This process involves several key steps:
+
+#### 1. Topic Selection and Prioritization
+
+The system selects topics using a weighted scoring approach:
+
+```javascript
+// In questionGeneratorService.ts
+// Step 2.1: Get the most recent answered questions
+const recentTopics = await getRecentAnsweredTopics(userId, 10);
+
+// Step 2.2: Extract weighted topics from user profile
+const weightedTopics: {name: string, weight: number}[] = [];
+if (userProfile && userProfile.topics) {
+  weightedTopics.push(
+    ...Object.entries(userProfile.topics)
+      .map(([name, data]) => ({ name, weight: data.weight || 0 }))
+      .sort((a, b) => b.weight - a.weight)
+  );
+}
+
+// Step 2.3: Create a balanced prioritized topic list by combining recency and weight
+const topicScores: Record<string, number> = {};
+
+// Score recent topics (0.5 points for each, with most recent getting more)
+recentTopics.forEach((topic, index) => {
+  const recencyScore = 0.5 * (recentTopics.length - index) / recentTopics.length;
+  topicScores[topic] = (topicScores[topic] || 0) + recencyScore;
+});
+
+// Score weighted topics (direct weight value from profile)
+weightedTopics.forEach(topic => {
+  topicScores[topic.name] = (topicScores[topic.name] || 0) + topic.weight;
+});
+
+// Calculate final scores and sort
+const scoredTopics = Object.entries(topicScores)
+  .map(([topic, score]) => ({ topic, score }))
+  .sort((a, b) => b.score - a.score);
+
+// Take top topics as prioritized list
+const prioritizedTopics = scoredTopics.slice(0, 6).map(t => t.topic);
+```
+
+This approach ensures that questions are generated for topics the user has both:
+- Recently interacted with (recency score)
+- Demonstrated high interest in (weight score from profile)
+
+#### 2. Hierarchical Topic Combinations
+
+The system builds specialized topic-subtopic and topic-branch combinations for more targeted question generation:
+
+```javascript
+// Step 2.4: Extract subtopics from high-weight main topics
+const subtopicWeights: {topic: string, subtopic: string, weight: number}[] = [];
+
+if (userProfile && userProfile.topics) {
+  // Extract subtopics from top weighted topics with weight >= 0.5
+  Object.entries(userProfile.topics)
+    .filter(([topicName]) => {
+      const foundTopic = weightedTopics.find(t => t.name === topicName);
+      return foundTopic && foundTopic.weight >= 0.5;
+    })
+    .forEach(([topicName, topicData]) => {
+      Object.entries(topicData.subtopics || {}).forEach(([subtopicName, subtopicData]) => {
+        subtopicWeights.push({
+          topic: topicName,
+          subtopic: subtopicName,
+          weight: subtopicData.weight || 0
+        });
+      });
+    });
+}
+
+// Create combined hierarchical topics (topic:subtopic, topic:branch)
+const combinedTopics: string[] = [];
+
+// Add topic:subtopic combinations for topics with high weights
+if (subtopicWeights.length > 0) {
+  const sortedSubtopicWeights = [...subtopicWeights].sort((a, b) => b.weight - a.weight);
+  
+  // Take top 3 subtopics and create combined format
+  sortedSubtopicWeights.slice(0, 3).forEach(item => {
+    combinedTopics.push(`${item.topic}:${item.subtopic}`);
+  });
+}
+```
+
+This hierarchical approach allows the system to request questions about very specific areas of interest (e.g., "History:Renaissance" instead of just "History").
+
+#### 3. Adjacent Topic Discovery
+
+To expand user interests, the system identifies related topics:
+
+```javascript
+// Step 3: Get adjacent topics for exploration
+const topicMapper = getTopicMapper();
+const adjacentTopics: string[] = [];
+
+primaryTopics.forEach(topic => {
+  const related = topicMapper.getRelatedTopics(topic);
+  adjacentTopics.push(...related);
+});
+
+// Deduplicate and remove any that are already in primary topics
+const uniqueAdjacentTopics = Array.from(new Set(adjacentTopics))
+  .filter(topic => !primaryTopics.includes(topic));
+```
+
+The `TopicMapper` uses a predefined relationship map:
+
+```javascript
+// In topicMapperService.ts
+const TOPIC_RELATIONS: Record<string, string[]> = {
+  'Science': ['Physics', 'Biology', 'Chemistry', 'Astronomy', 'Technology'],
+  'Physics': ['Science', 'Astronomy', 'Mathematics'],
+  'History': ['Ancient History', 'Modern History', 'Politics', 'Geography'],
+  // More mappings...
+};
+```
+
+#### 4. Subtopic and Branch Extraction
+
+To further enhance personalization, the system extracts top subtopics and branches:
+
+```javascript
+// Extract top subtopics, branches, and tags for more detailed prompting
+if (userProfile && userProfile.topics) {
+  // Collect all subtopics with weights
+  const allSubtopics: {topic: string, subtopic: string, weight: number}[] = [];
+  const allBranches: {topic: string, subtopic: string, branch: string, weight: number}[] = [];
+  
+  // Extract subtopics and branches
+  Object.entries(userProfile.topics).forEach(([topicName, topicData]) => {
+    Object.entries(topicData.subtopics || {}).forEach(([subtopicName, subtopicData]) => {
+      // Add subtopic with full context
+      allSubtopics.push({
+        topic: topicName,
+        subtopic: subtopicName,
+        weight: subtopicData.weight || 0
+      });
+      
+      // Add branches with full context
+      Object.entries(subtopicData.branches || {}).forEach(([branchName, branchData]) => {
+        allBranches.push({
+          topic: topicName,
+          subtopic: subtopicName,
+          branch: branchName,
+          weight: branchData.weight || 0
+        });
+      });
+    });
+  });
+  
+  // Sort by weight and take top items
+  topSubtopics.push(...allSubtopics.sort((a, b) => b.weight - a.weight).slice(0, 5));
+  topBranches.push(...allBranches.sort((a, b) => b.weight - a.weight).slice(0, 5));
+}
+```
+
+#### 5. Tags and Recent Questions
+
+The system also extracts popular tags from recent questions:
+
+```javascript
+// Get tags from most recent questions the user has answered
+const { data: answerData } = await supabase
+  .from('user_answers')
+  .select('question_id')
+  .eq('user_id', userId)
+  .order('answer_time', { ascending: false })
+  .limit(10);
+
+if (answerData && answerData.length > 0) {
+  const questionIds = answerData.map((item: { question_id: string }) => item.question_id);
+  
+  // Get tags from these questions
+  const { data: questionData } = await supabase
+    .from('trivia_questions')
+    .select('tags')
+    .in('id', questionIds);
+  
+  // Extract and flatten all tags
+  const allTags: string[] = [];
+  questionData?.forEach((item: { tags: string[] }) => {
+    if (item.tags && Array.isArray(item.tags)) {
+      allTags.push(...item.tags);
+    }
+  });
+  
+  // Count tag frequency and take the most common
+  const tagCounts = allTags.reduce((acc: Record<string, number>, tag) => {
+    acc[tag] = (acc[tag] || 0) + 1;
+    return acc;
+  }, {});
+  
+  // Sort by frequency and take top 8
+  topTags.push(
+    ...Object.entries(tagCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([tag]) => tag)
+  );
+}
+```
+
+Additionally, recent questions are identified to avoid generating duplicates:
+
+```javascript
+// Get recent questions to avoid duplication 
+if (recentQuestions && recentQuestions.length > 0) {
+  // Use client-provided recent questions
+  validRecentQuestions = recentQuestions
+    .filter(q => q.questionText && q.questionText.length > 10)
+    .slice(0, 15); // Limit to 15 questions
+}
+```
+
+#### 6. Final Question Generation and Storage
+
+The system brings together all this personalization data to generate unique questions:
+
+```javascript
+// Generate questions with detailed preferences
+const generatedQuestions = await generateQuestions(
+  primaryTopics,               // Main topics of interest
+  uniqueAdjacentTopics,        // Related topics for exploration
+  6,                           // 6 questions from primary topics
+  6,                           // 6 questions from adjacent topics
+  finalSubtopics,              // Preferred subtopics
+  finalBranches,               // Preferred branches
+  finalTags,                   // Preferred tags
+  validRecentQuestions         // Recent questions to avoid duplication
+);
+
+// Filter out duplicates and save to database
+const savedCount = await saveUniqueQuestions(generatedQuestions);
+```
+
 ### Question Generation Process
 
 1. **Trigger Conditions**
