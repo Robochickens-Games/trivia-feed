@@ -471,6 +471,7 @@ const ProfileView: React.FC = () => {
           });
         
         if (error) {
+          console.error('Upload error:', error);
           throw error;
         }
         
@@ -480,13 +481,23 @@ const ProfileView: React.FC = () => {
           .from('userimages')
           .getPublicUrl(filePath);
         
+        if (!publicUrlData || !publicUrlData.publicUrl) {
+          throw new Error('Failed to get public URL for uploaded image');
+        }
+        
         newAvatarUrl = publicUrlData.publicUrl;
       }
       
       // Native platforms - iOS and Android
       if (typeof uriOrFile === 'string') {
         // Get current session for authentication
-        const { data: sessionData } = await supabase.auth.getSession();
+        const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+        
+        if (sessionError) {
+          console.error('Session error:', sessionError);
+          throw new Error('Failed to get authentication session');
+        }
+        
         const session = sessionData?.session;
         
         if (!session) {
@@ -537,6 +548,7 @@ const ProfileView: React.FC = () => {
         
         if (!uploadResponse.ok) {
           const errorText = await uploadResponse.text();
+          console.error('Upload error:', errorText);
           throw new Error(`Upload failed with status ${uploadResponse.status}`);
         }
         
@@ -546,39 +558,38 @@ const ProfileView: React.FC = () => {
           .from('userimages')
           .getPublicUrl(filePath);
         
-        newAvatarUrl = publicUrlData.publicUrl;
-        
-        // Verify the image has content
-        try {
-          const checkResponse = await fetch(newAvatarUrl, { method: 'HEAD' });
-          if (checkResponse.status !== 200 || parseInt(checkResponse.headers.get('content-length') || '0') === 0) {
-            console.warn('Image may be empty or not accessible yet');
-          }
-        } catch (verifyError) {
-          console.warn('Error verifying image:', verifyError);
+        if (!publicUrlData || !publicUrlData.publicUrl) {
+          throw new Error('Failed to get public URL for uploaded image');
         }
+        
+        newAvatarUrl = publicUrlData.publicUrl;
       }
       
-      if (newAvatarUrl) {
-        // Just update the avatar URL in the UI without refreshing the entire profile
-        setAvatarUrl(newAvatarUrl);
-        
-        // Silently update the database without refreshing the profile view
-        updateAvatarUrlInDatabase(newAvatarUrl);
-        
-        // Delete the old avatar file if it exists
-        if (oldAvatarUrl) {
-          deleteOldAvatar(oldAvatarUrl).catch(error => {
-            console.error('Failed to delete old avatar:', error);
-          });
-        }
-        
-        // Success message without refreshing the view
-        Alert.alert('Success', 'Avatar updated');
+      if (!newAvatarUrl) {
+        throw new Error('Failed to get new avatar URL');
       }
+      
+      // Update the avatar URL in the database
+      await updateAvatarUrlInDatabase(newAvatarUrl);
+      
+      // Update local state
+      setAvatarUrl(newAvatarUrl);
+      
+      // Delete the old avatar file if it exists
+      if (oldAvatarUrl) {
+        deleteOldAvatar(oldAvatarUrl).catch(error => {
+          console.error('Failed to delete old avatar:', error);
+        });
+      }
+      
+      // Success message without refreshing the view
+      Alert.alert('Success', 'Avatar updated successfully');
+      
+      return true;
     } catch (error: any) {
       console.error('Upload error:', error);
-      Alert.alert('Error uploading avatar', error.message);
+      Alert.alert('Error uploading avatar', error.message || 'Failed to upload image');
+      return false;
     } finally {
       setUploadingImage(false);
     }
@@ -615,13 +626,12 @@ const ProfileView: React.FC = () => {
     }
   };
   
-  // Silently update just the avatar URL in the database without refreshing the profile
+  // Improve the updateAvatarUrlInDatabase function to better handle state updates
   const updateAvatarUrlInDatabase = async (newAvatarUrl: string) => {
     try {
-      console.log('Silently updating avatar URL in database');
+      console.log('Updating avatar URL in database:', newAvatarUrl);
       
       // Only update the avatar_url field directly using supabase client
-      // This avoids triggering any navigation or screen refreshes
       const { error } = await supabase
         .from('user_profiles')
         .update({ avatar_url: newAvatarUrl })
@@ -629,20 +639,29 @@ const ProfileView: React.FC = () => {
       
       if (error) {
         console.error('Error updating avatar URL in database:', error);
+        throw error;
       } else {
         console.log('Avatar URL updated successfully in database');
         
+        // Update local state to show the new avatar immediately
+        setAvatarUrl(newAvatarUrl);
+        
         // Update profileData state without triggering full refresh
         if (profileData) {
-          // Create a new object to maintain immutability but only update the avatar_url
           setProfileData({
             ...profileData,
             avatar_url: newAvatarUrl
           });
         }
+        
+        // Update store if applicable
+        if (typeof updateProfile === 'function') {
+          updateProfile({ avatarUrl: newAvatarUrl });
+        }
       }
     } catch (error) {
-      console.error('Silent update error:', error);
+      console.error('Database update error:', error);
+      throw error;
     }
   };
 
@@ -720,209 +739,221 @@ const ProfileView: React.FC = () => {
     setShowScrollTooltip(false);
   };
 
+  // Add missing handleResendConfirmation function
+  const handleResendConfirmation = async () => {
+    try {
+      if (!emailForConfirmation) {
+        Alert.alert('Error', 'No email address provided');
+        return;
+      }
+      
+      if (resendConfirmationEmail) {
+        await resendConfirmationEmail(emailForConfirmation);
+        Alert.alert('Confirmation Sent', `A new confirmation email has been sent to ${emailForConfirmation}`);
+        setShowEmailModal(false);
+      } else {
+        throw new Error('Resend confirmation function not available');
+      }
+    } catch (error: any) {
+      console.error('Failed to resend confirmation:', error);
+      Alert.alert('Error', error.message || 'Failed to send confirmation email');
+    }
+  };
+
   const profileStyles = StyleSheet.create({
     container: {
       flex: 1,
       padding: 20,
+      backgroundColor: isDark ? '#151718' : '#f5f5f5',
     },
-    scrollView: {
-      flex: 1,
-    },
-    emptyState: {
-      flex: 1,
-      justifyContent: 'center',
-      alignItems: 'center',
-      padding: 20,
-    },
-    emptyText: {
-      fontSize: 18,
-      textAlign: 'center',
-      marginBottom: 20,
-      fontWeight: '500',
-    },
-    userInfoSection: {
+    header: {
       alignItems: 'center',
       marginBottom: 20,
     },
     avatarContainer: {
-      marginBottom: 10,
-    },
-    avatarPlaceholder: {
-      width: 100,
-      height: 100,
-      borderRadius: 50,
-      backgroundColor: isDark ? Colors.dark.tint : Colors.light.tint,
-      justifyContent: 'center',
+      position: 'relative',
+      marginBottom: 20,
       alignItems: 'center',
     },
-    avatarText: {
-      color: 'white',
-      fontSize: 36,
-      fontWeight: 'bold',
+    avatar: {
+      width: 120,
+      height: 120,
+      borderRadius: 60,
+      marginBottom: 10,
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
     },
-    avatarImage: {
-      width: 100,
-      height: 100,
-      borderRadius: 50,
+    avatarPlaceholder: {
+      width: 120,
+      height: 120,
+      borderRadius: 60,
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginBottom: 10,
+    },
+    avatarText: {
+      fontSize: 40,
+      fontWeight: 'bold',
+      color: isDark ? 'rgba(255, 255, 255, 0.5)' : 'rgba(0, 0, 0, 0.5)',
     },
     editAvatarButton: {
       position: 'absolute',
-      bottom: 0,
-      right: 0,
-      backgroundColor: '#0a7ea4',
+      bottom: 10,
+      right: '50%',
+      marginRight: -55,
+      backgroundColor: currentTheme === 'neon' ? '#FFFF00' : '#ffc107',
       width: 30,
       height: 30,
       borderRadius: 15,
       justifyContent: 'center',
       alignItems: 'center',
-      borderWidth: 2,
-      borderColor: isDark ? '#1c1c1c' : 'white',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.3,
+      shadowRadius: 2,
+      elevation: 2,
     },
-    emailText: {
+    username: {
+      fontSize: 24,
+      fontWeight: 'bold',
+      textAlign: 'center',
+      marginBottom: 5,
+    },
+    email: {
       fontSize: 16,
-      marginBottom: 20,
-      opacity: 0.7,
+      color: isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.6)',
+      textAlign: 'center',
+      marginBottom: 10,
     },
-    detailsSection: {
-      marginBottom: 20,
-    },
-    detailRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      paddingVertical: 12,
-      borderBottomWidth: 1,
-      borderBottomColor: 'rgba(150, 150, 150, 0.2)',
-    },
-    detailLabel: {
-      fontSize: 16,
-      opacity: 0.7,
-    },
-    detailValue: {
-      fontSize: 16,
-      fontWeight: '600',
-    },
-    editButton: {
-      marginTop: 20,
+    section: {
       marginBottom: 20,
     },
-    editButtonText: {
-      color: 'white',
-      fontSize: 16,
-      fontWeight: '500',
-    },
-    formContainer: {
-      marginTop: 10,
+    sectionTitle: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      marginBottom: 10,
     },
     inputContainer: {
       marginBottom: 15,
     },
-    inputLabel: {
-      fontSize: 14,
-      marginBottom: 6,
-      opacity: 0.7,
+    label: {
+      fontSize: 16,
+      marginBottom: 5,
+      color: isDark ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)',
     },
     input: {
+      height: 50,
       borderWidth: 1,
-      borderColor: 'rgba(150, 150, 150, 0.3)',
+      borderColor: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
       borderRadius: 8,
-      padding: 12,
-      fontSize: 16,
+      paddingHorizontal: 10,
       color: isDark ? 'white' : 'black',
-    },
-    buttonContainer: {
-      marginTop: 20,
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-    },
-    saveButton: {
-      flex: 1,
-      backgroundColor: '#0a7ea4',
-      padding: 12,
-      borderRadius: 8,
-      alignItems: 'center',
-      marginRight: 8,
-    },
-    saveButtonText: {
-      color: 'white',
-      fontSize: 16,
-      fontWeight: '500',
-    },
-    cancelButton: {
-      flex: 1,
-      backgroundColor: 'rgba(150, 150, 150, 0.2)',
-      padding: 12,
-      borderRadius: 8,
-      alignItems: 'center',
-      marginLeft: 8,
-    },
-    cancelButtonText: {
-      fontSize: 16,
-      fontWeight: '500',
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'white',
     },
     pickerContainer: {
       borderWidth: 1,
-      borderColor: 'rgba(150, 150, 150, 0.3)',
+      borderColor: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
       borderRadius: 8,
       overflow: 'hidden',
     },
-    pickerWeb: {
-      borderWidth: 1,
-      borderColor: 'rgba(150, 150, 150, 0.3)',
-      borderRadius: 8,
-      padding: 12,
-      width: '100%',
-      backgroundColor: 'transparent',
+    picker: {
+      height: 50,
+      color: isDark ? 'white' : 'black',
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'white',
     },
-    pickerIOS: {
-      width: '100%',
+    pickerItem: {
+      height: 50,
+    },
+    buttonsContainer: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginTop: 20,
+    },
+    button: {
+      flex: 1,
+      height: 50,
+      borderRadius: 8,
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginHorizontal: 5,
+    },
+    cancelButton: {
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+    },
+    saveButton: {
+      backgroundColor: currentTheme === 'neon' ? '#FFFF00' : '#ffc107',
+    },
+    buttonText: {
+      fontSize: 16,
+      fontWeight: 'bold',
+    },
+    cancelButtonText: {
+      color: isDark ? 'white' : 'black',
+    },
+    saveButtonText: {
+      color: 'black',
+    },
+    disabledButton: {
+      opacity: 0.5,
+    },
+    errorText: {
+      color: '#f44336',
+      marginTop: 5,
+    },
+    loadingContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    modalContainer: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    },
+    modalContent: {
+      width: '80%',
+      backgroundColor: isDark ? '#151718' : 'white',
+      borderRadius: 10,
+      padding: 20,
+      alignItems: 'center',
+      shadowColor: '#000',
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+      shadowOpacity: 0.25,
+      shadowRadius: 3.84,
+      elevation: 5,
+    },
+    modalTitle: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      marginBottom: 15,
+    },
+    pickerModalContainer: {
+      flex: 1,
+      justifyContent: 'flex-end',
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
     },
     pickerModalContent: {
-      position: 'absolute',
-      bottom: 0,
-      left: 0,
-      right: 0,
+      backgroundColor: isDark ? '#151718' : 'white',
       borderTopLeftRadius: 15,
       borderTopRightRadius: 15,
-      paddingBottom: 20,
+      padding: 20,
     },
     pickerHeader: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
-      paddingHorizontal: 15,
-      paddingVertical: 10,
+      marginBottom: 15,
       borderBottomWidth: 1,
-      borderBottomColor: 'rgba(150, 150, 150, 0.2)',
-    },
-    pickerTitle: {
-      fontSize: 16,
-      fontWeight: 'bold',
-    },
-    pickerCancel: {
-      fontSize: 16,
-      color: 'red',
-    },
-    pickerDone: {
-      fontSize: 16,
-      color: 'blue',
-      fontWeight: 'bold',
-    },
-    modalContainer: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0, 0, 0, 0.5)',
-      justifyContent: 'center',
-      alignItems: 'center',
-      padding: 15,
-      borderBottomWidth: 1,
-      borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+      paddingBottom: 15,
+      borderBottomColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
     },
     pickerTitle: {
       fontSize: 18,
-      color: 'white',
+      color: isDark ? 'white' : 'black',
       fontWeight: '600',
     },
     pickerCancel: {
@@ -939,310 +970,141 @@ const ProfileView: React.FC = () => {
     buttonRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
-      marginTop: 20,
+      marginTop: 15,
     },
-    actionButton: {
-      flex: 1,
-      paddingVertical: 12,
-      borderRadius: 8,
-      alignItems: 'center',
-      marginHorizontal: 5,
-    },
-    cancelButton: {
-      backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    },
-    cancelButtonText: {
-      color: 'rgba(255, 255, 255, 0.8)',
-      fontSize: 16,
-    },
-    saveButton: {
-      backgroundColor: currentTheme === 'neon' ? '#FFFF00' : '#ffc107',
-    },
-    saveButtonText: {
-      color: 'black',
-      fontSize: 16,
-      fontWeight: '600',
-    },
-    loadingOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: isDark ? 'rgba(0, 0, 0, 0.7)' : 'rgba(0, 0, 0, 0.5)',
-      justifyContent: 'center',
-      alignItems: 'center',
-    },
-    avatarTipContainer: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginBottom: 12,
-      padding: 10,
-      backgroundColor: currentTheme === 'neon' 
-        ? 'rgba(255, 255, 0, 0.15)' // Yellow with opacity for neon theme
-        : `${getThemeColor('primary')}15`, // 15% opacity
-      borderRadius: 8,
-      borderLeftWidth: 3,
-      borderLeftColor: getThemeColor('primary'),
-    },
-    avatarTip: {
-      marginLeft: 10,
-      fontSize: 14,
-      color: getThemeColor('primary'),
-      flex: 1,
-    },
-    avatarButtonsContainer: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      marginTop: 8,
-    },
-    avatarButton: {
-      paddingVertical: 12,
+    modalButton: {
+      paddingVertical: 10,
       paddingHorizontal: 15,
-      borderRadius: 8,
-      justifyContent: 'center',
-      alignItems: 'center',
-      flex: 1,
+      borderRadius: 5,
       marginHorizontal: 5,
-      flexDirection: 'row',
     },
-    uploadButton: {
-      backgroundColor: '#0a7ea4',
-    },
-    removeButton: {
-      backgroundColor: '#e74c3c',
-    },
-    avatarButtonText: {
-      color: '#fff',
-      fontSize: 14,
-      fontWeight: '500',
-      marginLeft: 8,
-    },
-    addPhotoHint: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginBottom: 10,
-      backgroundColor: currentTheme === 'neon' 
-        ? 'rgba(255, 255, 0, 0.15)' // Yellow with opacity for neon theme
-        : `${getThemeColor('primary')}15`, // 15% opacity
-      paddingVertical: 6,
-      paddingHorizontal: 12,
-      borderRadius: 20,
-    },
-    addPhotoText: {
-      color: currentTheme === 'neon' ? '#FFFF00' : getThemeColor('primary'),
-      fontSize: 14,
-      marginLeft: 6,
-    },
-    editAvatarButton: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      backgroundColor: 'rgba(0, 0, 0, 0.4)',
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      justifyContent: 'center',
-      alignItems: 'center',
-      borderWidth: 3,
-      borderColor: isDark ? '#ffffff' : '#000',
-    },
-    guestModeContainer: {
-      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.7)' : 'rgba(245, 245, 245, 0.9)',
-      padding: 20,
-      borderRadius: 10,
-      alignItems: 'center',
-      width: '100%',
-      maxWidth: 400,
-    },
-    guestModeTitle: {
-      fontSize: 22,
-      fontWeight: 'bold',
-      marginBottom: 12,
-      color: currentTheme === 'neon' ? '#FFFF00' : '#ffc107',
-    },
-    guestModeMessage: {
-      fontSize: 16,
-      marginBottom: 16,
-      textAlign: 'center',
-      opacity: 0.8,
-    },
-    guestModeBenefits: {
-      alignSelf: 'stretch',
-      marginBottom: 24,
-    },
-    benefitRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginBottom: 10,
-    },
-    benefitText: {
-      fontSize: 15,
-    },
-    accountSection: {
-      marginTop: 20,
-      backgroundColor: isDark ? 'rgba(30, 30, 30, 0.7)' : 'rgba(245, 245, 245, 0.9)',
-      padding: 16,
-      borderRadius: 10,
-    },
-    accountSectionTitle: {
-      fontSize: 18,
-      fontWeight: 'bold',
-      marginBottom: 16,
-      textAlign: 'center',
-    },
-    // New styles for the sign-in/confirmation email screen
-    actionButtonsContainer: {
-      width: '100%',
-      maxWidth: 350,
-      marginTop: 24,
-      padding: 16,
-    },
-    divider: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginVertical: 20,
-    },
-    dividerLine: {
-      flex: 1,
-      height: 1,
-      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
-    },
-    dividerText: {
-      marginHorizontal: 10,
-      fontSize: 14,
-      fontWeight: '600',
-      color: isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.6)',
-    },
-    signInButton: {
-      marginBottom: 8,
-      backgroundColor: '#3498db',
-    },
-    resendEmailButton: {
-      marginBottom: 8,
-      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)',
-    },
-    modalOverlay: {
-      flex: 1,
-      backgroundColor: 'rgba(0, 0, 0, 0.6)',
-      justifyContent: 'center',
-      alignItems: 'center',
-    },
-    modalContent: {
+    emailModalContent: {
       width: '90%',
-      maxWidth: 400,
-      backgroundColor: isDark ? '#222' : '#FFF',
-      borderRadius: 12,
-      padding: 24,
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.25,
-      shadowRadius: 3.84,
-      elevation: 5,
+      backgroundColor: isDark ? '#222' : 'white',
+      borderRadius: 10,
+      padding: 20,
     },
-    modalTitle: {
+    emailModalTitle: {
       fontSize: 18,
       fontWeight: 'bold',
-      marginBottom: 16,
+      marginBottom: 10,
       textAlign: 'center',
     },
-    modalDescription: {
+    emailModalText: {
       fontSize: 14,
-      marginBottom: 16,
+      marginBottom: 20,
       textAlign: 'center',
-      color: isDark ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.7)',
+      lineHeight: 20,
     },
-    modalInput: {
+    emailInput: {
+      height: 50,
       borderWidth: 1,
       borderColor: isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)',
       borderRadius: 8,
-      padding: 12,
-      marginBottom: 24,
-      fontSize: 16,
-      color: isDark ? '#FFFFFF' : '#000000',
-      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)',
+      paddingHorizontal: 10,
+      marginBottom: 20,
+      color: isDark ? 'white' : 'black',
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'white',
     },
-    modalButtons: {
+    emailButtonsContainer: {
       flexDirection: 'row',
       justifyContent: 'space-between',
     },
-    modalButton: {
-      flex: 1,
-      padding: 12,
-      borderRadius: 8,
-      alignItems: 'center',
-    },
-    modalCancelButton: {
+    closeButton: {
       backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
-      marginRight: 8,
-    },
-    modalCancelText: {
-      fontSize: 16,
-      fontWeight: '600',
-      color: isDark ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.7)',
     },
     sendButton: {
-      backgroundColor: '#3498db',
-      marginLeft: 8,
+      backgroundColor: currentTheme === 'neon' ? '#FFFF00' : '#007aff',
     },
     sendButtonText: {
-      color: '#FFFFFF',
+      color: currentTheme === 'neon' ? 'black' : 'white',
       fontSize: 16,
       fontWeight: '600',
     },
-    themeToggleContainer: {
-      marginTop: 20,
+    closeButtonText: {
+      color: isDark ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)',
+      fontSize: 16,
     },
-    pickerModalContainer: {
+    verifyEmail: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: 5,
+    },
+    verifyEmailText: {
+      color: currentTheme === 'neon' ? '#FFFF00' : '#007aff',
+      marginLeft: 6,
+    },
+    toggleContainer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: 10,
+      paddingVertical: 15,
+      paddingHorizontal: 10,
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
+      borderRadius: 8,
+    },
+    toggleText: {
       flex: 1,
-      justifyContent: 'flex-end',
-      alignItems: 'center',
-    },
-    pickerCloseButton: {
-      position: 'absolute',
-      top: 20,
-      right: 20,
-    },
-    closeButton: {
-      zIndex: 10,
-    },
-    closeButtonInner: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      justifyContent: 'center',
-      alignItems: 'center',
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 1 },
-      shadowOpacity: 0.2,
-      shadowRadius: 1.5,
-      elevation: 2,
+      fontSize: 16,
     },
     tooltipContainer: {
       position: 'absolute',
-      left: 0,
-      right: 0,
-      top: 130,
-      alignItems: 'center',
-      zIndex: 100,
-    },
-    tooltipContent: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: currentTheme === 'neon'
-        ? 'rgba(255, 255, 0, 0.2)'
-        : 'rgba(255, 193, 7, 0.2)',
-      padding: 10,
-      borderRadius: 8,
-      borderWidth: 1,
-      borderColor: currentTheme === 'neon'
-        ? 'rgba(255, 255, 0, 0.5)'
-        : 'rgba(255, 193, 7, 0.5)',
-      maxWidth: '90%',
+      width: 250,
+      padding: 15,
+      backgroundColor: isDark ? '#333' : 'white',
+      borderRadius: 10,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.27,
+      shadowRadius: 4.65,
+      elevation: 6,
+      zIndex: 1000,
     },
     tooltipText: {
-      marginHorizontal: 10,
       fontSize: 14,
-      flex: 1,
+      lineHeight: 20,
+      marginBottom: 10,
     },
-    tooltipCloseButton: {
-      padding: 5,
+    tooltipButton: {
+      backgroundColor: currentTheme === 'neon' ? '#FFFF00' : '#007aff',
+      padding: 8,
+      borderRadius: 5,
+      alignItems: 'center',
+    },
+    tooltipButtonText: {
+      color: currentTheme === 'neon' ? 'black' : 'white',
+      fontWeight: '600',
+    },
+    tooltipArrow: {
+      position: 'absolute',
+      width: 0,
+      height: 0,
+      borderLeftWidth: 10,
+      borderRightWidth: 10,
+      borderBottomWidth: 10,
+      borderLeftColor: 'transparent',
+      borderRightColor: 'transparent',
+      borderBottomColor: isDark ? '#333' : 'white',
+      top: -10,
+      alignSelf: 'center',
+    },
+    divider: {
+      height: 1,
+      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+      marginVertical: 15,
+    },
+    removeAvatar: {
+      position: 'absolute',
+      top: 0,
+      right: '50%',
+      marginRight: -55,
+      backgroundColor: isDark ? 'rgba(255, 0, 0, 0.8)' : 'rgba(255, 0, 0, 0.8)',
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      justifyContent: 'center',
+      alignItems: 'center',
+      zIndex: 10,
     },
   });
 
